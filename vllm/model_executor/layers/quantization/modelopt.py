@@ -483,9 +483,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             # layer.weight_scale = Parameter(
             #     layer.weight_scale.reciprocal().squeeze(), requires_grad=False
             # )
-            layer.weight_scale = Parameter(
-                layer.weight_scale.squeeze(), requires_grad=False
-            )
+            layer.weight_scale.data = layer.weight_scale.data.squeeze()
 
         if not self.quant_config.is_block_quant:
             weight = layer.weight
@@ -741,9 +739,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.w13_weight = Parameter(layer.w13_weight.data, requires_grad=False)
-        layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
-
         if self.quant_config.is_block_quant:
             self._process_weights_after_loading_blockscale(layer)
         else:
@@ -757,24 +752,38 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         assert block_shape is not None
 
         # Squeeze the scales first
-        layer.w13_weight_scale = Parameter(
-            layer.w13_weight_scale.squeeze(), requires_grad=False
-        )
-        layer.w2_weight_scale = Parameter(
-            layer.w2_weight_scale.squeeze(), requires_grad=False
-        )
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.squeeze()
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.squeeze()
 
         # Apply padding if needed
-        required_padding = w13_weight.size(-2) % block_shape[0]
-        if required_padding != 0:
-            layer.w13_weight = Parameter(
-                torch.nn.functional.pad(w13_weight, (0, 0, 0, required_padding)),
-                requires_grad=False,
+        if not hasattr(layer, "w13_weight_from_checkpoint"):
+            layer.w13_weight_from_checkpoint = ModelWeightParameter(
+                data=w13_weight.data,
+                input_dim=2,
+                output_dim=1,
+                weight_loader=w13_weight.weight_loader,
             )
-            layer.w2_weight = Parameter(
-                torch.nn.functional.pad(w2_weight, (0, required_padding, 0, 0)),
-                requires_grad=False,
+            layer.register_parameter("w13_weight_from_checkpoint", layer.w13_weight_from_checkpoint)
+            layer.w2_weight_from_checkpoint = ModelWeightParameter(
+                data=w2_weight.data,
+                input_dim=2,
+                output_dim=1,
+                weight_loader=w2_weight.weight_loader,
             )
+            layer.register_parameter("w2_weight_from_checkpoint", layer.w2_weight_from_checkpoint)
+            print(f"layer.w13_weight_from_checkpoint.data.shape={layer.w13_weight_from_checkpoint.data.shape}")
+            print(f"layer.w2_weight_from_checkpoint.data.shape={layer.w2_weight_from_checkpoint.data.shape}")
+            required_padding = w13_weight.size(-2) % block_shape[0]
+            if required_padding != 0:
+                layer.w13_weight.data = torch.nn.functional.pad(w13_weight, (0, 0, 0, required_padding))
+                layer.w2_weight.data = torch.nn.functional.pad(w2_weight, (0, required_padding, 0, 0))
+        else:
+            w13_weight = layer.w13_weight_from_checkpoint
+            w2_weight = layer.w2_weight_from_checkpoint
+            required_padding = w13_weight.size(-2) % block_shape[0]
+            if required_padding != 0:
+                layer.w13_weight.data = torch.nn.functional.pad(w13_weight, (0, 0, 0, required_padding))
+                layer.w2_weight.data = torch.nn.functional.pad(w2_weight, (0, required_padding, 0, 0))
 
         # FlashInfer weight transformations (must be done before DeepGEMM preprocessing)
         if self.flashinfer_moe_backend is not None:
@@ -803,10 +812,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                     use_e8m0=is_deep_gemm_e8m0_used(),
                 )
             )
-            layer.w13_weight = Parameter(dg_w13_weight, requires_grad=False)
-            layer.w13_weight_scale = Parameter(dg_w13_weight_scale, requires_grad=False)
-            layer.w2_weight = Parameter(dg_w2_weight, requires_grad=False)
-            layer.w2_weight_scale = Parameter(dg_w2_weight_scale, requires_grad=False)
+            layer.w13_weight.data = dg_w13_weight
+            layer.w13_weight_scale.data = dg_w13_weight_scale
+            layer.w2_weight.data = dg_w2_weight
+            layer.w2_weight_scale.data = dg_w2_weight_scale
 
     def _process_weights_after_loading_per_tensor(self, layer: torch.nn.Module) -> None:
         """Process FP8 MoE weights after loading from serialized checkpoint.
