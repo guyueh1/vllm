@@ -576,7 +576,8 @@ class EngineArgs:
         CacheConfig.kv_offloading_backend
     )
     tokens_only: bool = False
-
+    return_routed_experts: bool = False
+    
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -719,6 +720,9 @@ class EngineArgs:
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
+        )
+        load_group.add_argument(
+            "--return-routed-experts", **load_kwargs["return_routed_experts"]
         )
 
         # Attention arguments
@@ -1392,6 +1396,7 @@ class EngineArgs:
             mamba_block_size=self.mamba_block_size,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
+            return_routed_experts=self.return_routed_experts,
         )
 
         ray_runtime_env = None
