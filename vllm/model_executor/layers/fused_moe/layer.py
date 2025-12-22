@@ -37,7 +37,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_global_experts_capturer
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_global_experts_capturer, _RoutedExpertsCapturerNoop
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
@@ -1934,6 +1934,25 @@ class FusedMoE(CustomOp):
                 layer=self,
                 x=staged_hidden_states,
                 router_logits=staged_router_logits,
+                top_k=self.top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                global_num_experts=self.global_num_experts,
+                expert_map=self.expert_map
+                if not self.rocm_aiter_fmoe_enabled
+                else self.expert_mask,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                e_score_correction_bias=self.e_score_correction_bias,
+                activation=self.activation,
+                enable_eplb=self.enable_eplb,
+                expert_load_view=self.expert_load_view,
+                logical_to_physical_map=self.logical_to_physical_map,
+                logical_replica_count=self.logical_replica_count,
+                moe_layer_num=moe_layer_num,
             )
 
             if has_separate_shared_experts:
