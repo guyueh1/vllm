@@ -237,6 +237,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert layer.weight.dtype in [torch.float16, torch.float32, torch.bfloat16], (
+            "Only FP16, BF16 and FP32 UnquantizedLinearMethod is supported"
+        )
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
 
@@ -279,6 +282,9 @@ class LinearBase(CustomOp):
         self.prefix = prefix
         if quant_config is None:
             self.quant_method: QuantizeMethodBase | None = UnquantizedLinearMethod()
+            logger.info_once(
+                f"[Quant] No quantization config provided for {self.quant_method.__class__.__name__}. Using UnquantizedLinearMethod for prefix {prefix}"
+            )
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
         self.return_bias = return_bias
@@ -840,7 +846,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             assert self.quant_method is not None
             # Assume the weight block size has been set by quant method
             assert hasattr(self, "weight_block_size")
-            weight_block_size = self.weight_block_size
+            weight_block_size = self.weight_block_size if self.weight_block_size else [1, 32]
             assert weight_block_size is not None
             block_n, _ = weight_block_size[0], weight_block_size[1]
             shard_offset = (
@@ -1035,7 +1041,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             assert self.quant_method is not None
             # Assume the weight block size has been set by quant method
             assert hasattr(self, "weight_block_size")
-            weight_block_size = self.weight_block_size
+            weight_block_size = self.weight_block_size if self.weight_block_size else [1, 32]
             assert weight_block_size is not None
             block_n, _ = weight_block_size[0], weight_block_size[1]
             shard_offset = (shard_offset + block_n - 1) // block_n

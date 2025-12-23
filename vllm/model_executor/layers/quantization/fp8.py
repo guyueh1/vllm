@@ -3,6 +3,7 @@
 
 from enum import Enum
 from functools import partial
+from math import ceil
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -32,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
+    mxfp8_fake_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
@@ -44,11 +46,11 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
+    log_quant_method_call
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
-    apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
@@ -76,12 +78,18 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+    mxfp8_e4m3_quantize_python,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
+    swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp,
+    MXFp8LinearOp,
     all_close_1d,
     cutlass_block_fp8_supported,
     cutlass_fp8_supported,
@@ -206,6 +214,23 @@ def get_fp8_moe_backend(
     return Fp8MoeBackend.TRITON
 
 
+def round_up(x, base):
+    return ((x + base - 1) // base) * base
+
+
+def pad_to(t: torch.Tensor, dim: int, pad_to: int) -> torch.Tensor:
+    prev_shape = list(t.shape)
+    prev_shape[dim] = pad_to
+    padded_t = t.new_zeros(*prev_shape)
+    if dim == 2:
+        padded_t[:, :, : t.shape[dim]] = t
+    elif dim == 1:
+        padded_t[:, : t.shape[dim], :] = t
+    else:
+        raise ValueError()
+    return padded_t
+
+
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
 
@@ -215,6 +240,8 @@ class Fp8Config(QuantizationConfig):
         activation_scheme: str = "dynamic",
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,
+        is_mx: bool = False,
+        weight_scheme: str = "static",
     ) -> None:
         super().__init__()
 
@@ -241,7 +268,9 @@ class Fp8Config(QuantizationConfig):
                     "dynamic activation scheme for now, but got "
                     f"{activation_scheme} activation scheme."
                 )
+        self.is_mx = is_mx
         self.weight_block_size = weight_block_size
+        self.weight_scheme = weight_scheme
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -270,6 +299,8 @@ class Fp8Config(QuantizationConfig):
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
+        is_mx = cls.get_from_keys_or(config, ["is_mx"], False)
+        weight_scheme = cls.get_from_keys_or(config, ["weight_scheme"], "static")
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
@@ -279,6 +310,8 @@ class Fp8Config(QuantizationConfig):
             activation_scheme=activation_scheme,
             ignored_layers=ignored_layers,
             weight_block_size=weight_block_size,
+            is_mx=is_mx,
+            weight_scheme=weight_scheme,
         )
 
     def get_xpu_quant_method(
@@ -309,7 +342,8 @@ class Fp8Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
-
+    
+    @log_quant_method_call
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
@@ -420,6 +454,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
+        elif quant_config.is_mx:
+            self.weight_block_size = [1, 32]
+            self.fp8_linear = MXFp8LinearOp()
         else:
             self.fp8_linear = Fp8LinearOp(
                 act_quant_static=self.act_q_static,
@@ -459,7 +496,10 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         # WEIGHT
-        if self.quant_config.is_checkpoint_fp8_serialized:
+        if (
+            self.quant_config.is_checkpoint_fp8_serialized
+            and self.quant_config.weight_scheme == "static"
+        ):
             weight = create_fp8_weight_parameter(
                 output_size_per_partition, input_size_per_partition, weight_loader
             )
@@ -505,7 +545,18 @@ class Fp8LinearMethod(LinearMethodBase):
         # Otherwise, wait until process_weights_after_loading.
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
-            if not self.block_quant:
+            if self.quant_config.is_mx:
+                scale = create_fp8_scale_parameter(
+                    BlockQuantScaleParameter,
+                    output_partition_sizes,
+                    input_size_per_partition,
+                    [1, 32],
+                    weight_loader,
+                    dtype=torch.uint8,
+                )
+                set_weight_attrs(scale, {"scale_type": "weight_scale"})
+                layer.register_parameter("weight_scale", scale)
+            elif not self.block_quant:
                 scale = create_fp8_scale_parameter(
                     PerTensorScaleParameter,
                     output_partition_sizes,
@@ -570,7 +621,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
                 # If using w8a8, torch._scaled_mm needs per tensor, so
                 # requantize the logical shards as a single weight.
-                if not self.use_marlin:
+                if not (self.use_marlin or self.quant_config.is_mx):
                     weight, weight_scale, input_scale = (
                         process_fp8_weight_tensor_strategy(
                             weight,
@@ -582,11 +633,21 @@ class Fp8LinearMethod(LinearMethodBase):
                     if self.act_q_static:
                         assert input_scale is not None
                         input_scale = input_scale.max()
-                weight = weight.t()
+                if not self.quant_config.is_mx:
+                    weight = weight.t()
+
+            if self.quant_config.is_mx:
+                if self.quant_config.weight_scheme == "dynamic":
+                    weight, weight_scale = mxfp8_e4m3_quantize_python(.weight.data.to(torch.bfloat16))
+                weight_scale = swizzle_blockscale(weight_scale)
 
             # Update layer with new values.
-            replace_parameter(layer, "weight", weight.data)
-            replace_parameter(layer, "weight_scale", weight_scale.data)
+            if self.quant_config.is_mx:
+                layer.weight_for_apply = Parameter(weight.data, requires_grad=False)
+                layer.weight_scale_for_apply = Parameter(weight_scale.data, requires_grad=False)
+            else:
+                replace_parameter(layer, "weight", weight.data)
+                replace_parameter(layer, "weight_scale", weight_scale.data)
 
         if input_scale is not None:
             replace_parameter(layer, "input_scale", input_scale)
@@ -612,6 +673,13 @@ class Fp8LinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
         # we will use BF16 dequant when DeepGEMM is not supported.
+
+        # asserts for RL team:
+        assert self.quant_config.is_mx, "Only MXFP8 is supported"
+        assert not self.block_quant, "Block quantization is not supported"
+        assert layer.weight.dtype == torch.float8_e4m3fn or (self.quant_config.is_mx and layer.weight_for_apply.dtype == torch.float8_e4m3fn), "Weight must be FP8" 
+        assert layer.weight_scale.dtype == torch.uint8, "Weight scale must be uint8"
+
         if vllm_is_batch_invariant():
             if self.block_quant:
                 assert self.weight_block_size is not None
@@ -674,6 +742,16 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias,
             )
 
+        if self.quant_config.is_mx:
+            assert layer.weight_for_apply.dtype == torch.float8_e4m3fn, "Weight for apply must be FP8"
+            assert layer.weight_scale_for_apply.dtype == torch.uint8, "Weight scale for apply must be uint8"
+            return self.fp8_linear.apply(
+                input=x,
+                weight=layer.weight_for_apply,
+                weight_scale=layer.weight_scale_for_apply,
+                out_dtype=self.out_dtype,
+                bias=bias,
+            )
         return self.fp8_linear.apply(
             input=x,
             weight=layer.weight,
@@ -744,8 +822,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
-
-        if self.quant_config.is_checkpoint_fp8_serialized:
+        quant_method = None
+        
+        if (
+            self.quant_config.is_checkpoint_fp8_serialized
+            and self.quant_config.weight_scheme == "static"
+        ):
             params_dtype = torch.float8_e4m3fn
         if self.block_quant:
             assert self.weight_block_size is not None
@@ -808,11 +890,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             new_extra_weight_attrs["weight_loader"] = patched_weight_loader
             extra_weight_attrs = new_extra_weight_attrs
 
+        numu_shards = 2 if layer.is_gated else 1
+        
+        intermediate_size_per_partition = self._maybe_increase_intermediate_size_for_mxfp8(intermediate_size_per_partition)
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                numu_shards * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -834,7 +919,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
         # WEIGHT_SCALES
-        if not self.block_quant:
+        if self.quant_config.is_mx:
+            w13_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    numu_shards * intermediate_size_per_partition,
+                    hidden_size // 32,
+                    dtype=torch.uint8,
+                ),
+                requires_grad=False,
+            )
+            w2_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition // 32,
+                    dtype=torch.uint8,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_weight_scale", w13_weight_scale)
+            layer.register_parameter("w2_weight_scale", w2_weight_scale)
+            quant_method = FusedMoeWeightScaleSupported.MXFP8.value
+        elif not (self.block_quant):
             # Allocate 2 scales for w1 and w3 respectively.
             # They will be combined to a single scale after weight loading.
             w13_weight_scale = torch.nn.Parameter(
@@ -845,11 +952,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
             layer.register_parameter("w13_weight_scale", w13_weight_scale)
             layer.register_parameter("w2_weight_scale", w2_weight_scale)
+            quant_method = FusedMoeWeightScaleSupported.TENSOR.value
         else:
             w13_weight_scale = torch.nn.Parameter(
                 torch.ones(
                     num_experts,
-                    2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                    numu_shards
+                    * ((intermediate_size_per_partition + block_n - 1) // block_n),
                     (hidden_size + block_k - 1) // block_k,
                     dtype=torch.float32,
                 ),
@@ -867,21 +976,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.register_parameter("w13_weight_scale_inv", w13_weight_scale)
             layer.register_parameter("w2_weight_scale_inv", w2_weight_scale)
             assert self.quant_config.activation_scheme == "dynamic"
-
+            quant_method = FusedMoeWeightScaleSupported.BLOCK.value
         # Add the quantization method used (per tensor/grouped/channel)
         # to ensure the weight scales are loaded in properly
-        extra_weight_attrs.update(
-            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
-            if self.block_quant
-            else {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
-        )
+        
+        assert quant_method is not None, "quant_method should be set"
+        extra_weight_attrs.update({"quant_method": quant_method})
         # If loading fp8 checkpoint, pass the weight loaders.
         # If loading an fp16 checkpoint, do not (we will quantize in
         #   process_weights_after_loading()
         if self.quant_config.is_checkpoint_fp8_serialized:
             set_weight_attrs(w13_weight_scale, extra_weight_attrs)
             set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-
+        if self.quant_config.is_mx:
+            set_weight_attrs(w13_weight, {"quant_method": quant_method})
+            set_weight_attrs(w2_weight, {"quant_method": quant_method})
         # INPUT_SCALES
         if self.quant_config.activation_scheme == "static":
             if not self.quant_config.is_checkpoint_fp8_serialized:
@@ -907,6 +1016,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_input_scale = None
 
         self.rocm_aiter_moe_enabled = False
+
+    def _maybe_increase_intermediate_size_for_mxfp8(self, intermediate_size_per_partition: int) -> int:
+        if self.quant_config.is_mx:
+            # For MXFP8, we need to pad the weight tensors to be deivisible by tp_size * 32
+            divisible_by = 32
+            if intermediate_size_per_partition % divisible_by != 0:
+                increase = divisible_by - intermediate_size_per_partition % divisible_by
+                logger.debug_once(
+                    f"Padding intermediate_size_per_partition from "
+                    f"{intermediate_size_per_partition} to "
+                    f"{intermediate_size_per_partition + increase} for MXFP8."
+                )
+                intermediate_size_per_partition += increase
+        return intermediate_size_per_partition
+
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -1068,6 +1192,105 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max then dequant and requant each expert.
+            if self.quant_config.is_mx:
+                if self.flashinfer_moe_backend is not None:
+                    # This is a hack for mxfp8 only
+                    assert (
+                        self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+                    )
+                    # register_moe_scaling_factors(layer)
+
+                    # pad weights
+                    layer.intermediate_size_per_partition = round_up(
+                        layer.intermediate_size_per_partition, 128
+                    )
+                    layer.w13_weight = Parameter(
+                        pad_to(
+                            layer.w13_weight, 1, layer.intermediate_size_per_partition
+                        ).contiguous(),
+                        requires_grad=False,
+                    )
+                    layer.w13_weight_scale = Parameter(
+                        pad_to(
+                            layer.w13_weight_scale,
+                            1,
+                            layer.intermediate_size_per_partition,
+                        )
+                        .to(dtype=torch.uint8)
+                        .contiguous(),
+                        requires_grad=False,
+                    )
+                    layer.w2_weight = Parameter(
+                        pad_to(
+                            layer.w2_weight, 2, layer.intermediate_size_per_partition
+                        ).contiguous(),
+                        requires_grad=False,
+                    )
+                    layer.w2_weight_scale = Parameter(
+                        pad_to(
+                            layer.w2_weight_scale,
+                            2,
+                            layer.intermediate_size_per_partition // 32,
+                        )
+                        .to(dtype=torch.uint8)
+                        .contiguous(),
+                        requires_grad=False,
+                    )
+
+                    gemm1_w, gemm2_w, gemm1_s, gemm2_s = (
+                        rotate_flashinfer_fp8_moe_weights(
+                            layer.w13_weight,
+                            layer.w2_weight,
+                            layer.w13_weight_scale.to(dtype=torch.uint8),
+                            layer.w2_weight_scale.to(dtype=torch.uint8),
+                        )
+                    )
+                    layer.w13_weight_shuffled = Parameter(gemm1_w, requires_grad=False)
+                    layer.w2_weight_shuffled = Parameter(gemm2_w, requires_grad=False)
+                    layer.w13_scales_shuffled = Parameter(gemm1_s, requires_grad=False)
+                    layer.w2_scales_shuffled = Parameter(gemm2_s, requires_grad=False)
+                    del layer.w13_weight
+                    del layer.w2_weight
+                    del layer.w13_weight_scale
+                    del layer.w2_weight_scale
+                else:
+
+                    def maybe_quantize(weight, weight_scale_attr):
+                        """Quantize dynamically or use prequantized weights."""
+                        if self.quant_config.weight_scheme == "dynamic":
+                            return mxfp8_e4m3_quantize_python(
+                                weight.data.to(torch.bfloat16)
+                            )
+                        else:
+                            return weight, weight_scale_attr
+
+                    # -------------------------
+                    # w13 processing
+                    # -------------------------
+                    w13_q, w13_scale = maybe_quantize(
+                        layer.w13_weight, layer.w13_weight_scale
+                    )
+
+                    dq_w13 = dequant_mxfp8_to_bf16(w13_q, w13_scale).contiguous()
+                    layer.w13_weight = Parameter(dq_w13.data, requires_grad=False)
+
+                    # -------------------------
+                    # w2 processing
+                    # -------------------------
+                    w2_q, w2_scale_full = maybe_quantize(
+                        layer.w2_weight, layer.w2_weight_scale
+                    )
+
+                    # Select expert block
+                    blk = ceil(w2_q.shape[-1] / 32)
+                    start = layer.ep_rank * blk
+                    end = (layer.ep_rank + 1) * blk
+                    w2_scale = w2_scale_full[..., start:end]
+
+                    dq_w2 = dequant_mxfp8_to_bf16(w2_q, w2_scale).contiguous()
+                    layer.w2_weight = Parameter(dq_w2.data, requires_grad=False)
+                return
+
             assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_weight_scale.max(dim=1).values
@@ -1099,8 +1322,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 assert not self.block_quant
                 register_moe_scaling_factors(layer)
                 w13_weight = swap_w13_to_w31(layer.w13_weight.data)
-                if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                    rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
+                # TODO: hack to avoid ruff
+                # if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+                #     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
                 layer.w13_weight.data = w13_weight.data
 
         if self.use_marlin:
@@ -1207,6 +1431,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.use_marlin:
             return None
 
+        if self.quant_config.is_mx:
+            if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+                return mxfp8_fake_w8a8_moe_quant_config(
+                    w1_scale=layer.w13_weight_shuffled,
+                    w2_scale=layer.w2_weight_shuffled,
+                )
+            else:
+                return mxfp8_fake_w8a8_moe_quant_config(
+                    w1_scale=layer.w13_weight_scale,
+                    w2_scale=layer.w2_weight_scale,
+                )
+
         return fp8_w8a8_moe_quant_config(
             w1_scale=(
                 layer.w13_weight_scale_inv
@@ -1235,12 +1471,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # asserts for RL team:
+        assert self.quant_config.is_mx, "Only MXFP8 is supported"
+        assert not self.block_quant, "Block quantization is not supported"
+        # assert layer.w13_weight.dtype == torch.bfloat16, "Weights must be BF16 when using fake quant MXFP8"
+        # assert layer.w2_weight.dtype == torch.bfloat16, "Weights must be BF16 when using fake quant MXFP8"
+
+        # EPLB assertions
+
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             if layer.enable_eplb:
                 raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
-            assert layer.activation == "silu", (
-                f"Expected 'silu' activation but got {layer.activation}"
-            )
+            # assert layer.activation == "silu", (
+            #     f"Expected 'silu' activation but got {layer.activation}"
+            # )
 
             if self.block_quant:
                 import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
@@ -1273,20 +1517,47 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     routed_scaling=layer.routed_scaling_factor,
                 )
             else:
-                assert (
-                    not layer.renormalize and layer.custom_routing_function is not None
-                )
-                result = apply_flashinfer_per_tensor_scale_fp8(
-                    layer=layer,
-                    hidden_states=x,
-                    router_logits=router_logits,
-                    routing_bias=layer.e_score_correction_bias,
-                    global_num_experts=layer.global_num_experts,
-                    top_k=layer.top_k,
-                    num_expert_group=layer.num_expert_group,
-                    topk_group=layer.topk_group,
-                    apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                )
+                # TODO: hack
+                # assert (
+                #     not layer.renormalize and layer.custom_routing_function is not None
+                # )
+                # result = apply_flashinfer_per_tensor_scale_fp8(
+                #     layer=layer,
+                #     hidden_states=x,
+                #     router_logits=router_logits,
+                #     routing_bias=layer.e_score_correction_bias,
+                #     global_num_experts=layer.global_num_experts,
+                #     top_k=layer.top_k,
+                #     num_expert_group=layer.num_expert_group,
+                #     topk_group=layer.topk_group,
+                #     apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                # )
+                from flashinfer import mxfp8_quantize
+                from flashinfer.fused_moe.core import trtllm_mxfp8_block_scale_moe
+
+                x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
+                x_scale = x_scale.view(torch.float8_e4m3fn).reshape(*x.shape[:-1], -1)
+                flashinfer_output = trtllm_mxfp8_block_scale_moe(
+                    routing_logits=router_logits,
+                    routing_bias=e_score_correction_bias,
+                    hidden_states=x_quant,
+                    hidden_states_scale=x_scale,
+                    gemm1_weights=layer.w13_weight_shuffled,
+                    gemm1_weights_scale=layer.w13_scales_shuffled,
+                    gemm2_weights=layer.w2_weight_shuffled,
+                    gemm2_weights_scale=layer.w2_scales_shuffled,
+                    num_experts=global_num_experts,
+                    top_k=top_k,
+                    n_group=num_expert_group,
+                    topk_group=topk_group,
+                    intermediate_size=layer.intermediate_size_per_partition,
+                    local_expert_offset=0,
+                    local_num_experts=global_num_experts,
+                    routed_scaling_factor=routed_scaling_factor,
+                    routing_method_type=2,  # deepseek
+                    gemm1_bias=None,
+                )[0]
+                return flashinfer_output
 
         select_result = layer.select_experts(
             hidden_states=x,
