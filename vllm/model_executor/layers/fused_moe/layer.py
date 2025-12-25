@@ -1840,11 +1840,11 @@ class FusedMoE(CustomOp):
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
                 # Note: CPU doesn't require wrapped forward_impl.
-                fused_output = self.forward_impl(hidden_states, router_logits)
+                fused_output = self.forward_impl(hidden_states, router_logits, moe_layer_num)
                 assert not isinstance(fused_output, tuple)
             else:
                 fused_output = torch.ops.vllm.moe_forward(
-                    hidden_states, router_logits, self.layer_name
+                    hidden_states, router_logits, self.layer_name, moe_layer_num
                 )
             return reduce_output(fused_output)[..., :og_hidden_states]
         else:
@@ -1853,12 +1853,11 @@ class FusedMoE(CustomOp):
                 # will switch to using the moe_forward custom op.
                 # Note: CPU doesn't require wrapped forward_impl.
                 shared_output, fused_output = self.forward_impl(
-                    hidden_states, router_logits
+                    hidden_states, router_logits, moe_layer_num 
                 )
             else:
                 shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
-                    hidden_states, router_logits, self.layer_name, 
-                    moe_layer_num
+                    hidden_states, router_logits, self.layer_name, moe_layer_num 
                 )
             return (
                 reduce_output(shared_output)[..., :og_hidden_states],
@@ -2254,17 +2253,19 @@ def moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     layer_name: str,
+    moe_layer_num: int,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.shared_experts is None
-    return self.forward_impl(hidden_states, router_logits)
+    return self.forward_impl(hidden_states, router_logits, moe_layer_num)
 
 
 def moe_forward_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     layer_name: str,
+    moe_layer_num: int,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
