@@ -435,6 +435,10 @@ class OpenAIServingChat(OpenAIServing):
                 request_metadata,
             )
 
+        assert (
+            request.n is None or request.n <= 1
+        ), "n must be <= 1 for non-streaming chat completions with routed experts"
+
         try:
             return await self.chat_completion_full_generator(
                 request,
@@ -698,6 +702,9 @@ class OpenAIServingChat(OpenAIServing):
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
+                assert (
+                    res.routed_experts is None
+                ), "routed_experts is not supported for streaming chat completions"
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
@@ -1231,7 +1238,7 @@ class OpenAIServingChat(OpenAIServing):
                             finish_reason_ = (
                                 output.finish_reason if output.finish_reason else "stop"
                             )
-                        choice_data = ChatCompletionResponseStreamChoice(
+                        choice_kwargs = dict(
                             index=i,
                             delta=delta_message,
                             logprobs=logprobs,
@@ -1242,6 +1249,9 @@ class OpenAIServingChat(OpenAIServing):
                                 if request.return_token_ids
                                 else None
                             ),
+                        )
+                        choice_data = ChatCompletionResponseStreamChoice(
+                            **choice_kwargs
                         )
 
                         finish_reason_sent[i] = True
@@ -1354,6 +1364,13 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res is not None
 
+        prompt_routed_experts_payload = None
+        routed_experts_payload = None
+        if final_res.routed_experts is not None:
+            assert final_res.prompt_token_ids
+            prompt_len = len(final_res.prompt_token_ids)
+            prompt_routed_experts_payload = final_res.routed_experts[:prompt_len].tolist()
+            routed_experts_payload = final_res.routed_experts[prompt_len:].tolist()
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
             history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
@@ -1413,7 +1430,7 @@ class OpenAIServingChat(OpenAIServing):
                         content=content,
                     )
 
-                choice_data = ChatCompletionResponseChoice(
+                choice_kwargs = dict(
                     index=output.index,
                     message=message,
                     logprobs=logprobs,
@@ -1429,6 +1446,9 @@ class OpenAIServingChat(OpenAIServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                 )
+                if routed_experts_payload is not None:
+                    choice_kwargs["routed_experts"] = routed_experts_payload
+                choice_data = ChatCompletionResponseChoice(**choice_kwargs)
                 choices.append(choice_data)
                 continue
 
@@ -1573,7 +1593,7 @@ class OpenAIServingChat(OpenAIServing):
                 and output.finish_reason == "stop"
             )
 
-            choice_data = ChatCompletionResponseChoice(
+            choice_kwargs = dict(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
@@ -1587,6 +1607,9 @@ class OpenAIServingChat(OpenAIServing):
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
             )
+            if routed_experts_payload is not None:
+                choice_kwargs["routed_experts"] = routed_experts_payload
+            choice_data = ChatCompletionResponseChoice(**choice_kwargs)
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
             choices.append(choice_data)
@@ -1635,6 +1658,7 @@ class OpenAIServingChat(OpenAIServing):
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
+            prompt_routed_experts=prompt_routed_experts_payload,
             kv_transfer_params=final_res.kv_transfer_params,
         )
 
