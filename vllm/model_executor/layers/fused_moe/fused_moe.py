@@ -1167,6 +1167,7 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
+    # Kernel computes top-k expert indices/weights per token from router logits.
     topk_func = dispatch_topk_func(use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled())
     topk_weights, topk_ids = topk_func(
         topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
@@ -1190,6 +1191,7 @@ def fused_topk_bias(
 
     # For batch invariance, use sorted=True to ensure deterministic expert selection
     use_sorted = vllm_is_batch_invariant()
+    # Top-k indices from bias-corrected router scores.
     topk_indices = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=use_sorted)[1]
     topk_weights = scores.gather(1, topk_indices)
     if renormalize:
@@ -1271,6 +1273,7 @@ def grouped_topk(
     tmp_scores = scores.masked_fill(~score_mask.bool(), float("-inf"))  # [n, e]
 
     if e_score_correction_bias is not None:
+        # Grouped top-k indices after masking to selected expert groups.
         topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=use_sorted)[1]
         # Use original unbiased scores for the routing weights
         topk_weights = original_scores.gather(1, topk_ids)
