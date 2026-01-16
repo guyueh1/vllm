@@ -432,6 +432,8 @@ class LlamaModel(nn.Module):
             islice(self.layers, self.start_layer, self.end_layer)
         ):
             if idx in self.aux_hidden_state_layers:
+                # Capture auxiliary hidden states for spec decode (e.g., Eagle)
+                # to be returned alongside the final hidden states.
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
 

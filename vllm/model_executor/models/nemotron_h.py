@@ -53,6 +53,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_outputs import ModelForwardOutput
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -890,7 +891,7 @@ class NemotronHForCausalLM(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
 
-        return hidden_states
+        return ModelForwardOutput(hidden_states=hidden_states, aux_hidden_states=None)
 
     def compute_logits(
         self,
