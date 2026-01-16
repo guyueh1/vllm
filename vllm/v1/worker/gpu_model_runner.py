@@ -2703,6 +2703,8 @@ class GPUModelRunner(
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
+        # Logprobs are produced on-device by the sampler and
+        # converted to lists for ModelRunnerOutput serialization.
         logprobs_lists = (
             logprobs_tensors.tolists(cu_num_tokens)
             if not self.use_async_scheduling and logprobs_tensors is not None

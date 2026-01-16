@@ -776,6 +776,8 @@ class OpenAIServingChat(OpenAIServing):
 
                     if request.logprobs and request.top_logprobs is not None:
                         assert output.logprobs is not None, "Did not output logprobs"
+                        # output.logprobs is a per-token list of dicts from the
+                        # engine (RequestOutput -> CompletionOutput).
                         logprobs = self._create_chat_logprobs(
                             token_ids=output.token_ids,
                             top_logprobs=output.logprobs,
@@ -1402,6 +1404,7 @@ class OpenAIServingChat(OpenAIServing):
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
+                # Convert engine logprobs into OpenAI ChatCompletion logprobs.
                 logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,
                     top_logprobs=out_logprobs,

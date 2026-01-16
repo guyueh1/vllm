@@ -120,7 +120,9 @@ class EngineCoreOutput(
     request_id: str
     new_token_ids: list[int]
 
+    # Per-request logprobs sliced by the scheduler from ModelRunnerOutput.
     new_logprobs: LogprobsLists | None = None
+    # Prompt logprobs tensors from prefill, forwarded to LogprobsProcessor.
     new_prompt_logprobs_tensors: LogprobsTensors | None = None
 
     pooling_output: torch.Tensor | None = None

@@ -316,7 +316,8 @@ class RequestState:
         if not delta:
             token_ids = self.detokenizer.output_token_ids
 
-        # Prepare logprobs, based on delta mode
+        # Prepare logprobs, based on delta mode.
+        # Logprobs are per-request dicts assembled by LogprobsProcessor.
         logprobs = self.logprobs_processor.logprobs
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
@@ -502,6 +503,8 @@ class OutputProcessor:
 
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
+                # This consumes EngineCoreOutput.new_logprobs /
+                # new_prompt_logprobs_tensors into per-request logprob lists.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.

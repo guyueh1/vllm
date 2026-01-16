@@ -1170,6 +1170,8 @@ class Scheduler(SchedulerInterface):
                 and request.sampling_params.logprobs is not None
                 and logprobs
             ):
+                # Slice the batch logprobs from ModelRunnerOutput down to this
+                # request's newly generated positions for EngineCoreOutput.
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
@@ -1182,6 +1184,8 @@ class Scheduler(SchedulerInterface):
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
             # Get prompt logprobs for this request.
+            # These are still tensors produced by the model runner during
+            # prefill; the engine converts them into Python logprob dicts.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids or pooler_output is not None or kv_transfer_params:
                 # Add EngineCoreOutput for this Request.
