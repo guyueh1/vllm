@@ -275,7 +275,6 @@ class ForwardPassTensors(NamedTuple):
     logits: torch.Tensor | None
     # One tensor per routed MoE layer, shaped [num_tokens, top_k].
     moe_topk_indices: list[torch.Tensor] | None
-    moe_topk_indices: list[torch.Tensor] | None
 
 
 class ModelStepTensors(NamedTuple):
