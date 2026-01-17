@@ -259,14 +259,27 @@ class ExecuteModelState(NamedTuple):
     sample_tokens(), after execute_model() returns None."""
 
     scheduler_output: "SchedulerOutput"
-    logits: torch.Tensor
+    forward_tensors: "ForwardPassTensors"
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: CommonAttentionMetadata | None
-    hidden_states: torch.Tensor
-    sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
+
+
+class ForwardPassTensors(NamedTuple):
+    """Intermediate tensors from model forward through logits projection."""
+
+    hidden_states: torch.Tensor
+    sample_hidden_states: torch.Tensor
+    logits: torch.Tensor | None
+
+
+class ModelStepTensors(NamedTuple):
+    """Intermediate tensors spanning forward + sampling logprobs."""
+
+    forward_tensors: ForwardPassTensors
+    logprobs_tensors: LogprobsTensors | None
 
 
 class GPUModelRunner(
@@ -2602,8 +2615,7 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         sampler_output: SamplerOutput,
-        logits: torch.Tensor | None,
-        hidden_states: torch.Tensor,
+        step_tensors: ModelStepTensors,
         num_scheduled_tokens: int,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
@@ -2617,7 +2629,9 @@ class GPUModelRunner(
     ]:
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
-            num_nans_in_logits = self._get_nans_in_logits(logits)
+            num_nans_in_logits = self._get_nans_in_logits(
+                step_tensors.forward_tensors.logits
+            )
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
@@ -2635,7 +2649,7 @@ class GPUModelRunner(
 
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
-        logprobs_tensors = sampler_output.logprobs_tensors
+        logprobs_tensors = step_tensors.logprobs_tensors
         # logprobs_tensors (if present) contain top-k ids/logprobs per token
         # derived from the model logits in the sampler.
         invalid_req_indices = []
@@ -2718,7 +2732,7 @@ class GPUModelRunner(
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-            hidden_states[:num_scheduled_tokens],
+            step_tensors.forward_tensors.hidden_states[:num_scheduled_tokens],
             scheduler_output.num_scheduled_tokens,
         )
 
@@ -3243,13 +3257,16 @@ class GPUModelRunner(
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
+        forward_tensors = ForwardPassTensors(
+            hidden_states=hidden_states,
+            sample_hidden_states=sample_hidden_states,
+            logits=logits,
+        )
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
-            logits,
+            forward_tensors,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
-            hidden_states,
-            sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
             cudagraph_stats,
@@ -3281,17 +3298,19 @@ class GPUModelRunner(
         # Unpack ephemeral state.
         (
             scheduler_output,
-            logits,
+            forward_tensors,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
-            hidden_states,
-            sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
             cudagraph_stats,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
+
+        hidden_states = forward_tensors.hidden_states
+        sample_hidden_states = forward_tensors.sample_hidden_states
+        logits = forward_tensors.logits
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
@@ -3303,6 +3322,10 @@ class GPUModelRunner(
             # Sampler turns logits into sampled token ids and optional
             # logprobs tensors for downstream serialization.
             sampler_output = self._sample(logits, spec_decode_metadata)
+        step_tensors = ModelStepTensors(
+            forward_tensors=forward_tensors,
+            logprobs_tensors=sampler_output.logprobs_tensors,
+        )
 
         self.input_batch.prev_sampled_token_ids = None
 
@@ -3376,8 +3399,7 @@ class GPUModelRunner(
             ) = self._bookkeeping_sync(
                 scheduler_output,
                 sampler_output,
-                logits,
-                hidden_states,
+                step_tensors,
                 scheduler_output.total_num_scheduled_tokens,
                 spec_decode_metadata,
             )
@@ -3417,7 +3439,7 @@ class GPUModelRunner(
             async_output = AsyncGPUModelRunnerOutput(
                 model_runner_output=output,
                 sampled_token_ids=sampler_output.sampled_token_ids,
-                logprobs_tensors=sampler_output.logprobs_tensors,
+                logprobs_tensors=step_tensors.logprobs_tensors,
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
                 vocab_size=self.input_batch.vocab_size,
