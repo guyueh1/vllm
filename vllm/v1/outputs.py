@@ -170,6 +170,12 @@ class ModelRunnerOutput:
         default_factory=dict
     )
 
+    # Per-request MoE top-k indices for prompt tokens, accumulated across
+    # chunked prefill steps.
+    prompt_moe_topk_indices_dict: dict[str, list[torch.Tensor]] = field(
+        default_factory=dict
+    )
+
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] = field(
         default_factory=list

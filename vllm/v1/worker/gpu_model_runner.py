@@ -283,6 +283,7 @@ class ModelStepTensors(NamedTuple):
 
     forward_tensors: ForwardPassTensors
     logprobs_tensors: LogprobsTensors | None
+    moe_topk_indices: list[torch.Tensor] | None
 
 
 class GPUModelRunner(
@@ -2626,6 +2627,7 @@ class GPUModelRunner(
         LogprobsLists | None,
         list[list[int]],
         dict[str, LogprobsTensors | None],
+        dict[str, list[torch.Tensor]],
         list[str],
         dict[str, int],
         list[int],
@@ -2738,12 +2740,17 @@ class GPUModelRunner(
             step_tensors.forward_tensors.hidden_states[:num_scheduled_tokens],
             scheduler_output.num_scheduled_tokens,
         )
+        prompt_moe_topk_indices_dict = self._get_prompt_moe_topk_indices_dict(
+            step_tensors.forward_tensors.moe_topk_indices,
+            scheduler_output.num_scheduled_tokens,
+        )
 
         return (
             num_nans_in_logits,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
+            prompt_moe_topk_indices_dict,
             req_ids_output_copy,
             req_id_to_index_output_copy,
             invalid_req_indices,
@@ -3332,6 +3339,8 @@ class GPUModelRunner(
             # bookkeeping can consume a single combined view.
             forward_tensors=forward_tensors,
             logprobs_tensors=sampler_output.logprobs_tensors,
+            # Carry MoE top-k indices alongside per-step logprobs tensors.
+            moe_topk_indices=forward_tensors.moe_topk_indices,
         )
 
         self.input_batch.prev_sampled_token_ids = None
@@ -3400,6 +3409,7 @@ class GPUModelRunner(
                 logprobs_lists,
                 valid_sampled_token_ids,
                 prompt_logprobs_dict,
+                prompt_moe_topk_indices_dict,
                 req_ids_output_copy,
                 req_id_to_index_output_copy,
                 invalid_req_indices,
@@ -3429,6 +3439,7 @@ class GPUModelRunner(
                 sampled_token_ids=valid_sampled_token_ids,
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
+                prompt_moe_topk_indices_dict=prompt_moe_topk_indices_dict,
                 pooler_output=[],
                 kv_connector_output=kv_connector_output,
                 ec_connector_output=ec_connector_output
@@ -4009,6 +4020,74 @@ class GPUModelRunner(
             self._sync_device()
 
         return prompt_logprobs_dict
+
+    def _get_prompt_moe_topk_indices_dict(
+        self,
+        moe_topk_indices: list[torch.Tensor] | None,
+        num_scheduled_tokens: dict[str, int],
+    ) -> dict[str, list[torch.Tensor]]:
+        if not moe_topk_indices:
+            return {}
+
+        in_progress_dict = self.input_batch.in_progress_moe_topk_indices_cpu
+        prompt_moe_topk_indices_dict: dict[str, list[torch.Tensor]] = {}
+
+        completed_prefill_reqs: list[str] = []
+        for req_id, num_tokens in num_scheduled_tokens.items():
+            if num_tokens is None:
+                continue
+
+            request = self.requests[req_id]
+            if request.prompt_token_ids is None:
+                # Prompt MoE indices are incompatible with prompt embeddings.
+                continue
+
+            num_prompt_tokens = len(request.prompt_token_ids)
+            per_layer_tensors = in_progress_dict.get(req_id)
+            if not per_layer_tensors:
+                per_layer_tensors = [
+                    torch.empty(
+                        (num_prompt_tokens, topk_ids.shape[-1]),
+                        dtype=topk_ids.dtype,
+                        device="cpu",
+                    )
+                    for topk_ids in moe_topk_indices
+                ]
+                in_progress_dict[req_id] = per_layer_tensors
+
+            start_idx = request.num_computed_tokens
+            if start_idx >= num_prompt_tokens:
+                # Prompt portion is already complete for this request.
+                continue
+            num_remaining_tokens = num_prompt_tokens - start_idx
+            if num_tokens <= num_remaining_tokens:
+                num_copy_tokens = num_tokens
+            else:
+                num_copy_tokens = num_remaining_tokens
+                completed_prefill_reqs.append(req_id)
+                prompt_moe_topk_indices_dict[req_id] = per_layer_tensors
+
+            if num_copy_tokens <= 0:
+                continue
+
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            offset = self.query_start_loc.np[req_idx].item()
+            chunk_slice = slice(start_idx, start_idx + num_copy_tokens)
+            for layer_idx, topk_ids in enumerate(moe_topk_indices):
+                # Copy this step's MoE top-k ids into the preallocated
+                # [prompt_len, top_k] tensors for the request.
+                per_layer_tensors[layer_idx][chunk_slice].copy_(
+                    topk_ids[offset : offset + num_copy_tokens],
+                    non_blocking=True,
+                )
+
+        for req_id in completed_prefill_reqs:
+            del in_progress_dict[req_id]
+
+        if prompt_moe_topk_indices_dict:
+            self._sync_device()
+
+        return prompt_moe_topk_indices_dict
 
     def _get_nans_in_logits(
         self,
