@@ -139,8 +139,9 @@ class RequestState:
         self.sent_tokens_offset = 0  # Offset of sent tokens
         self.moe_topk_indices: list[np.ndarray] | None = None
         self.prompt_moe_topk_indices: list[torch.Tensor] | None = None
-        # The first decode step routes the final prompt token again, so drop
-        # one generated MoE row to avoid duplicating the last prompt token.
+        # The first sampled token comes from logits at the last prompt token,
+        # so the initial generation MoE row duplicates prompt[-1]. We drop
+        # that row once prompt MoE indices are available.
         self._should_drop_first_gen_moe_topk = False
         self._dropped_first_gen_moe_topk = False
 
@@ -153,6 +154,17 @@ class RequestState:
                 )
                 if has_prompt_positions:
                     self._should_drop_first_gen_moe_topk = True
+            if (
+                self._should_drop_first_gen_moe_topk
+                and not self._dropped_first_gen_moe_topk
+                and self.moe_topk_indices
+                and self.moe_topk_indices[0].shape[0] > 0
+            ):
+                # The prefill step already appended a generation row for the
+                # last prompt token (position P-1); drop it here so generated
+                # MoE indices start at position P.
+                self.moe_topk_indices = [layer[:-1] for layer in self.moe_topk_indices]
+                self._dropped_first_gen_moe_topk = True
 
         if output.new_moe_topk_indices is not None:
             per_layer = output.new_moe_topk_indices.topk_ids_per_layer
@@ -162,7 +174,8 @@ class RequestState:
                 and per_layer
                 and per_layer[0].shape[0] > 0
             ):
-                # Drop the duplicated row from the initial decode step once.
+                # Prompt MoE indices arrived before any generation rows were
+                # stored; drop the current first row instead.
                 per_layer = [layer[1:] for layer in per_layer]
                 self._dropped_first_gen_moe_topk = True
             if self.moe_topk_indices is None:
