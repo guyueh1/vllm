@@ -4090,6 +4090,8 @@ class GPUModelRunner(
                 # Prompt MoE indices are incompatible with prompt embeddings.
                 continue
 
+            # Prompt MoE indices track every prompt token position (prompt_len),
+            # even though prompt logprobs only cover prompt_len - 1 positions.
             num_prompt_tokens = len(request.prompt_token_ids)
             per_layer_tensors = in_progress_dict.get(req_id)
             start_idx = request.num_computed_tokens
