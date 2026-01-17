@@ -273,6 +273,9 @@ class ForwardPassTensors(NamedTuple):
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     logits: torch.Tensor | None
+    # One tensor per routed MoE layer, shaped [num_tokens, top_k].
+    moe_topk_indices: list[torch.Tensor] | None
+    moe_topk_indices: list[torch.Tensor] | None
 
 
 class ModelStepTensors(NamedTuple):
@@ -3197,6 +3200,7 @@ class GPUModelRunner(
             # ModelForwardOutput carries the last hidden states from the model
             # forward pass, which are later sliced into logits inputs.
             hidden_states = model_output.hidden_states
+            moe_topk_indices = model_output.moe_topk_indices
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
                 # Aux hidden states originate from model forward and are used
@@ -3261,6 +3265,7 @@ class GPUModelRunner(
             hidden_states=hidden_states,
             sample_hidden_states=sample_hidden_states,
             logits=logits,
+            moe_topk_indices=moe_topk_indices,
         )
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
