@@ -137,6 +137,27 @@ class RequestState:
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
+        self.moe_topk_indices: list[np.ndarray] | None = None
+        self.prompt_moe_topk_indices: list[torch.Tensor] | None = None
+
+    def update_moe_topk_from_output(self, output: EngineCoreOutput) -> None:
+        if output.new_moe_topk_indices is not None:
+            per_layer = output.new_moe_topk_indices.topk_ids_per_layer
+            if self.moe_topk_indices is None:
+                self.moe_topk_indices = [layer.copy() for layer in per_layer]
+            else:
+                self.moe_topk_indices = [
+                    np.concatenate([prev, layer], axis=0)
+                    for prev, layer in zip(self.moe_topk_indices, per_layer)
+                ]
+        if output.new_prompt_moe_topk_indices is not None:
+            self.prompt_moe_topk_indices = output.new_prompt_moe_topk_indices
+
+    def pop_prompt_moe_topk_indices(self) -> list[torch.Tensor] | None:
+        pmti = self.prompt_moe_topk_indices
+        if pmti:
+            self.prompt_moe_topk_indices = []
+        return pmti
 
     @classmethod
     def from_new_request(
@@ -279,8 +300,10 @@ class RequestState:
         if self.output_kind == RequestOutputKind.DELTA:
             # Side effect: logprobs processor forgets prompt logprobs
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
+            prompt_moe_topk_indices = self.pop_prompt_moe_topk_indices()
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
+            prompt_moe_topk_indices = self.prompt_moe_topk_indices
 
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
@@ -293,6 +316,7 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
+            prompt_moe_topk_indices=prompt_moe_topk_indices,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
@@ -322,11 +346,23 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
 
+        moe_topk_indices = None
+        if self.moe_topk_indices:
+            per_layer = self.moe_topk_indices
+            if delta:
+                if not token_ids:
+                    per_layer = []
+                else:
+                    per_layer = [layer[-len(token_ids) :] for layer in per_layer]
+            if per_layer:
+                moe_topk_indices = np.stack(per_layer, axis=1)
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             logprobs=logprobs,
+            moe_topk_indices=moe_topk_indices,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
@@ -506,6 +542,8 @@ class OutputProcessor:
                 # This consumes EngineCoreOutput.new_logprobs /
                 # new_prompt_logprobs_tensors into per-request logprob lists.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
+                # 3b) Aggregate MoE top-k indices for prompt/generated tokens.
+                req_state.update_moe_topk_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(

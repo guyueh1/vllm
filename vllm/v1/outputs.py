@@ -89,6 +89,22 @@ class LogprobsTensors(NamedTuple):
         )
 
 
+class MoETopkLists(NamedTuple):
+    # Per-layer top-k indices, each shaped [num_tokens, top_k].
+    topk_ids_per_layer: list[np.ndarray]
+    # Optional flattened offsets for variable-length outputs.
+    cu_num_generated_tokens: list[int] | None = None
+
+    def slice_request(self, req_idx: int, num_positions: int) -> "MoETopkLists":
+        if self.cu_num_generated_tokens is not None:
+            req_idx = self.cu_num_generated_tokens[req_idx]
+        end_idx = req_idx + num_positions
+        return MoETopkLists(
+            [layer[req_idx:end_idx] for layer in self.topk_ids_per_layer],
+            None,
+        )
+
+
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
 PoolerOutput = list[torch.Tensor | None] | torch.Tensor | None
@@ -159,6 +175,10 @@ class ModelRunnerOutput:
     # Produced in the model runner (CPU lists) and sliced per-request in
     # the scheduler into EngineCoreOutput.new_logprobs.
     logprobs: LogprobsLists | None = None
+
+    # Per-layer top-k MoE indices for the sampled tokens in this step.
+    # Sliced per-request in the scheduler into EngineCoreOutput.new_moe_topk_indices.
+    moe_topk_indices: MoETopkLists | None = None
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]

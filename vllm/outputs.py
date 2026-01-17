@@ -43,6 +43,7 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
+    moe_topk_indices: np.ndarray | None = None  # [seq_len, layer_num, top_k]
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
@@ -57,6 +58,7 @@ class CompletionOutput:
             f"token_ids={self.token_ids}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
+            f"moe_topk_indices={self.moe_topk_indices}, "
             f"finish_reason={self.finish_reason}, "
             f"stop_reason={self.stop_reason})"
         )
@@ -119,6 +121,7 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         *,
+        prompt_moe_topk_indices: list[torch.Tensor] | None = None,
         multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -134,6 +137,7 @@ class RequestOutput:
         self.prompt_token_ids = prompt_token_ids
         self.multi_modal_placeholders = multi_modal_placeholders or {}
         self.prompt_logprobs = prompt_logprobs
+        self.prompt_moe_topk_indices = prompt_moe_topk_indices
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
@@ -148,6 +152,8 @@ class RequestOutput:
 
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
+        if next_output.prompt_moe_topk_indices is not None:
+            self.prompt_moe_topk_indices = next_output.prompt_moe_topk_indices
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
@@ -161,6 +167,19 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)
+                        if next_completion.moe_topk_indices is not None:
+                            if completion.moe_topk_indices is None:
+                                completion.moe_topk_indices = (
+                                    next_completion.moe_topk_indices
+                                )
+                            else:
+                                completion.moe_topk_indices = np.concatenate(
+                                    [
+                                        completion.moe_topk_indices,
+                                        next_completion.moe_topk_indices,
+                                    ],
+                                    axis=0,
+                                )
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
@@ -181,6 +200,7 @@ class RequestOutput:
             f"encoder_prompt={self.encoder_prompt!r}, "
             f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
+            f"prompt_moe_topk_indices={self.prompt_moe_topk_indices}, "
             f"outputs={self.outputs}, "
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "

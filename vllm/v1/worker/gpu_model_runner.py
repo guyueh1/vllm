@@ -134,6 +134,7 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     LogprobsLists,
     LogprobsTensors,
+    MoETopkLists,
     ModelRunnerOutput,
     PoolerOutput,
     SamplerOutput,
@@ -143,7 +144,7 @@ from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
@@ -273,6 +274,7 @@ class ForwardPassTensors(NamedTuple):
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     logits: torch.Tensor | None
+    logits_indices: torch.Tensor | None
     # One tensor per routed MoE layer, shaped [num_tokens, top_k].
     moe_topk_indices: list[torch.Tensor] | None
 
@@ -2624,6 +2626,7 @@ class GPUModelRunner(
     ) -> tuple[
         dict[str, int],
         LogprobsLists | None,
+        MoETopkLists | None,
         list[list[int]],
         dict[str, LogprobsTensors | None],
         dict[str, list[torch.Tensor]],
@@ -2735,6 +2738,12 @@ class GPUModelRunner(
         )
 
         # Compute prompt logprobs if needed.
+        moe_topk_lists = self._get_moe_topk_lists(
+            step_tensors,
+            sampler_output,
+            spec_decode_metadata,
+            discard_sampled_tokens_req_indices,
+        )
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
             step_tensors.forward_tensors.hidden_states[:num_scheduled_tokens],
             scheduler_output.num_scheduled_tokens,
@@ -2747,6 +2756,7 @@ class GPUModelRunner(
         return (
             num_nans_in_logits,
             logprobs_lists,
+            moe_topk_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
             prompt_moe_topk_indices_dict,
@@ -3271,6 +3281,7 @@ class GPUModelRunner(
             hidden_states=hidden_states,
             sample_hidden_states=sample_hidden_states,
             logits=logits,
+            logits_indices=logits_indices,
             moe_topk_indices=moe_topk_indices,
         )
         self.execute_model_state = ExecuteModelState(
@@ -3406,6 +3417,7 @@ class GPUModelRunner(
             (
                 num_nans_in_logits,
                 logprobs_lists,
+                moe_topk_lists,
                 valid_sampled_token_ids,
                 prompt_logprobs_dict,
                 prompt_moe_topk_indices_dict,
@@ -3437,6 +3449,7 @@ class GPUModelRunner(
                 req_id_to_index=req_id_to_index_output_copy,
                 sampled_token_ids=valid_sampled_token_ids,
                 logprobs=logprobs_lists,
+                moe_topk_indices=moe_topk_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
                 prompt_moe_topk_indices_dict=prompt_moe_topk_indices_dict,
                 pooler_output=[],
@@ -3911,6 +3924,42 @@ class GPUModelRunner(
             tensorizer_config=tensorizer_config,
             model_config=self.model_config,
         )
+
+    def _get_moe_topk_lists(
+        self,
+        step_tensors: ModelStepTensors,
+        sampler_output: SamplerOutput,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        discard_req_indices: Sequence[int] = (),
+    ) -> MoETopkLists | None:
+        moe_topk_indices = step_tensors.moe_topk_indices
+        logits_indices = step_tensors.forward_tensors.logits_indices
+        if not moe_topk_indices or logits_indices is None:
+            return None
+
+        # Select MoE top-k ids for the logits positions.
+        per_layer = [topk_ids[logits_indices] for topk_ids in moe_topk_indices]
+        per_layer_cpu = [layer.to("cpu", non_blocking=True) for layer in per_layer]
+
+        cu_num_tokens = None
+        if spec_decode_metadata is not None and sampler_output.sampled_token_ids.shape[
+            -1
+        ] > 1:
+            output_token_ids_np = sampler_output.sampled_token_ids.cpu().numpy()
+            valid_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
+                output_token_ids_np < self.input_batch.vocab_size
+            )
+            if discard_req_indices:
+                valid_mask[list(discard_req_indices)] = False
+            cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
+            valid_mask_flat = valid_mask.flatten()
+            per_layer_np = [
+                layer.cpu().numpy()[valid_mask_flat] for layer in per_layer_cpu
+            ]
+            return MoETopkLists(per_layer_np, cu_num_tokens)
+
+        per_layer_np = [layer.cpu().numpy() for layer in per_layer_cpu]
+        return MoETopkLists(per_layer_np, cu_num_tokens)
 
     def _get_prompt_logprobs_dict(
         self,
