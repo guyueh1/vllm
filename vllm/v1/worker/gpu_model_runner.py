@@ -4104,9 +4104,6 @@ class GPUModelRunner(
                 in_progress_dict[req_id] = per_layer_tensors
 
             start_idx = request.num_computed_tokens
-            if start_idx >= num_prompt_tokens:
-                # Prompt portion is already complete for this request.
-                continue
             num_remaining_tokens = num_prompt_tokens - start_idx
             if num_tokens <= num_remaining_tokens:
                 num_copy_tokens = num_tokens
