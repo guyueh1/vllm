@@ -1683,7 +1683,11 @@ class OpenAIServingChat(OpenAIServing):
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
-            prompt_moe_topk_indices=final_res.prompt_moe_topk_indices,
+            prompt_moe_topk_indices=(
+                final_res.prompt_moe_topk_indices.tolist()
+                if final_res.prompt_moe_topk_indices is not None
+                else None
+            ),
             kv_transfer_params=final_res.kv_transfer_params,
         )
 

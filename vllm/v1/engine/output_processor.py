@@ -305,6 +305,16 @@ class RequestState:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
             prompt_moe_topk_indices = self.prompt_moe_topk_indices
 
+        if prompt_moe_topk_indices:
+            # Stack per-layer tensors into [prompt_len, num_layers, top_k].
+            prompt_moe_topk_indices = np.stack(
+                [
+                    layer.to(torch.int32).cpu().numpy()
+                    for layer in prompt_moe_topk_indices
+                ],
+                axis=1,
+            )
+
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
         if prompt_token_ids is None and self.prompt_embeds is not None:

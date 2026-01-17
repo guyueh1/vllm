@@ -121,7 +121,7 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         *,
-        prompt_moe_topk_indices: list[torch.Tensor] | None = None,
+        prompt_moe_topk_indices: np.ndarray | None = None,
         multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can

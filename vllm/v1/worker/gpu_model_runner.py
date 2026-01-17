@@ -4094,7 +4094,7 @@ class GPUModelRunner(
             per_layer_tensors = in_progress_dict.get(req_id)
             if not per_layer_tensors:
                 per_layer_tensors = [
-                    torch.empty(
+                    torch.zeros(
                         (num_prompt_tokens, topk_ids.shape[-1]),
                         dtype=topk_ids.dtype,
                         device="cpu",
