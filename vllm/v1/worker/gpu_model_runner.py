@@ -3987,6 +3987,9 @@ class GPUModelRunner(
 
             # Transfer GPU->CPU async.
             chunk_slice = slice(start_idx, start_idx + num_logits)
+            # Copy this step's prompt logprobs into the preallocated
+            # [prompt_len, num_logprobs] tensors, effectively concatenating
+            # chunks along the prompt token dimension.
             logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
                 token_ids, non_blocking=True
             )
