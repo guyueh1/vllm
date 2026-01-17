@@ -1386,6 +1386,10 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         assert final_res is not None
+        assert final_res.prompt_token_ids is not None
+        num_prompt_tokens = len(final_res.prompt_token_ids)
+        # prompt_moe_topk_indices = None
+        # logger.info(f"chat_completion_full_generator: prompt moe topk is None? {final_res.prompt_moe_topk_indices is None}")
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
@@ -1401,6 +1405,10 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
+
+            # if output.prompt_moe_topk_indices is not None:
+            #     prompt_moe_topk_indices = output.prompt_moe_topk_indices.tolist()
+            # logger.info(f"chat_completion_full_generator: output moe topk is None? {output.moe_topk_indices is None}")
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
@@ -1461,6 +1469,9 @@ class OpenAIServingChat(OpenAIServing):
                     stop_reason=output.stop_reason,
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
+                    ),
+                    moe_topk_indices=(
+                        output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
                     ),
                 )
                 choices.append(choice_data)
@@ -1620,6 +1631,9 @@ class OpenAIServingChat(OpenAIServing):
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
+                moe_topk_indices=(
+                    output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
+                ),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
@@ -1669,6 +1683,7 @@ class OpenAIServingChat(OpenAIServing):
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
+            prompt_moe_topk_indices=final_res.prompt_moe_topk_indices,
             kv_transfer_params=final_res.kv_transfer_params,
         )
 
