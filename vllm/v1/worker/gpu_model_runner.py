@@ -3323,6 +3323,8 @@ class GPUModelRunner(
             # logprobs tensors for downstream serialization.
             sampler_output = self._sample(logits, spec_decode_metadata)
         step_tensors = ModelStepTensors(
+            # Attach sampler logprobs to the forward-pass tensors so downstream
+            # bookkeeping can consume a single combined view.
             forward_tensors=forward_tensors,
             logprobs_tensors=sampler_output.logprobs_tensors,
         )
