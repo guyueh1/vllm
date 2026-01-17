@@ -205,6 +205,9 @@ class ForwardContext:
 
     ubatch_slices: UBatchSlices | None = None
 
+    # Collect per-MoE-layer top-k expert indices during the forward pass.
+    moe_topk_indices: list[torch.Tensor] = field(default_factory=list)
+
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"

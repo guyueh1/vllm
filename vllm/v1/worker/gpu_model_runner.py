@@ -51,6 +51,8 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import (
     BatchDescriptor,
+    get_forward_context,
+    is_forward_context_available,
     set_forward_context,
 )
 from vllm.logger import init_logger
@@ -2767,7 +2769,8 @@ class GPUModelRunner(
             **model_kwargs: Additional model arguments
 
         Returns:
-            ModelForwardOutput with hidden_states and optional aux_hidden_states.
+            ModelForwardOutput with hidden_states, aux_hidden_states, and
+            collected MoE top-k indices (if any).
         """
         output = self.model(
             input_ids=input_ids,
@@ -2776,7 +2779,16 @@ class GPUModelRunner(
             inputs_embeds=inputs_embeds,
             **model_kwargs,
         )
+        moe_topk_indices = None
+        if is_forward_context_available():
+            moe_topk_indices = get_forward_context().moe_topk_indices
         if isinstance(output, ModelForwardOutput):
+            if output.moe_topk_indices is None:
+                return ModelForwardOutput(
+                    hidden_states=output.hidden_states,
+                    aux_hidden_states=output.aux_hidden_states,
+                    moe_topk_indices=moe_topk_indices,
+                )
             return output
         if isinstance(output, tuple):
             if len(output) != 2:
@@ -2789,7 +2801,9 @@ class GPUModelRunner(
             hidden_states = output
             aux_hidden_states = None
         return ModelForwardOutput(
-            hidden_states=hidden_states, aux_hidden_states=aux_hidden_states
+            hidden_states=hidden_states,
+            aux_hidden_states=aux_hidden_states,
+            moe_topk_indices=moe_topk_indices,
         )
 
     @staticmethod

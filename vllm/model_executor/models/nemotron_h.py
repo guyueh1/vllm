@@ -891,7 +891,11 @@ class NemotronHForCausalLM(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
 
-        return ModelForwardOutput(hidden_states=hidden_states, aux_hidden_states=None)
+        return ModelForwardOutput(
+            hidden_states=hidden_states,
+            aux_hidden_states=None,
+            moe_topk_indices=None,
+        )
 
     def compute_logits(
         self,
