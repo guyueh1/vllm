@@ -2824,19 +2824,28 @@ class GPUModelRunner(
                 )
             return output
         if isinstance(output, tuple):
-            if len(output) != 2:
+            # In compiled/cudagraph dummy runs, ModelForwardOutput
+            # can be returned as a plain tuple, losing its NamedTuple type.
+            if len(output) == 2:
+                hidden_states, aux_hidden_states = output
+                output_moe_topk_indices = None
+            elif len(output) == 3:
+                hidden_states, aux_hidden_states, output_moe_topk_indices = output
+            else:
                 raise ValueError(
-                    "Expected model forward to return 2-tuple for aux "
-                    f"hidden states, got {len(output)} items."
+                    "Expected model forward to return 2-tuple or 3-tuple, "
+                    f"got {len(output)} items."
                 )
-            hidden_states, aux_hidden_states = output
         else:
             hidden_states = output
             aux_hidden_states = None
+            output_moe_topk_indices = None
+        if output_moe_topk_indices is None:
+            output_moe_topk_indices = moe_topk_indices
         return ModelForwardOutput(
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
-            moe_topk_indices=moe_topk_indices,
+            moe_topk_indices=output_moe_topk_indices,
         )
 
     @staticmethod
