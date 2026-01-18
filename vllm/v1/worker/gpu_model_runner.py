@@ -2814,6 +2814,10 @@ class GPUModelRunner(
         )
         moe_topk_indices = None
         if is_forward_context_available():
+            # MoE top-k indices are appended by the fused MoE layer as a
+            # Python-side side effect, so this list is empty during cudagraph
+            # replay (logprobs still update because they are computed later
+            # from logits outside the graph).
             moe_topk_indices = get_forward_context().moe_topk_indices
         if isinstance(output, ModelForwardOutput):
             if output.moe_topk_indices is None:

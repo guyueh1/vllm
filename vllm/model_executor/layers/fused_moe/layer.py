@@ -1664,7 +1664,10 @@ class FusedMoE(CustomOp):
         assert topk_ids.dtype == indices_type or indices_type is None
 
         if is_forward_context_available() and not torch._dynamo.is_compiling():
-            # Stash the router top-k indices for this layer in the forward context.
+            # Stash router top-k indices for this layer in the forward context.
+            # This is a Python-side side effect, so it only runs in eager
+            # execution (including cudagraph capture) and is skipped during
+            # torch.compile tracing and cudagraph replay.
             get_forward_context().moe_topk_indices.append(topk_ids)
 
         # Compute zero expert result if needed
