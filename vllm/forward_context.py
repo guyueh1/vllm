@@ -183,6 +183,15 @@ class DPMetadata:
 
 
 @dataclass
+class MoETopkCapture:
+    """Shared buffers for capturing per-layer MoE top-k ids inside a cudagraph."""
+
+    buffers: list[torch.Tensor]
+    layer_id_to_index: dict[int, int]
+    token_offset: int = 0
+
+
+@dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]

@@ -15,6 +15,7 @@ from vllm.distributed import get_ep_group
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     DPMetadata,
+    MoETopkCapture,
     create_forward_context,
     get_forward_context,
     override_forward_context,
@@ -303,10 +304,19 @@ class UBatchWrapper:
         dp_metadata,
         batch_descriptor,
         cudagraph_runtime_mode,
+        additional_kwargs: dict[str, Any] | None = None,
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
         for i, ubatch_slice in enumerate(ubatch_slices):
+            ubatch_kwargs = dict(additional_kwargs) if additional_kwargs else {}
+            moe_topk_capture = ubatch_kwargs.get("moe_topk_capture")
+            if moe_topk_capture is not None:
+                ubatch_kwargs["moe_topk_capture"] = MoETopkCapture(
+                    buffers=moe_topk_capture.buffers,
+                    layer_id_to_index=moe_topk_capture.layer_id_to_index,
+                    token_offset=ubatch_slice.token_slice.start,
+                )
             forward_contexts.append(
                 create_forward_context(
                     attn_metadata[i] if attn_metadata is not None else None,
@@ -314,6 +324,7 @@ class UBatchWrapper:
                     dp_metadata=dp_metadata[i],
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    additional_kwargs=ubatch_kwargs,
                 )
             )
 
@@ -406,6 +417,7 @@ class UBatchWrapper:
                 return self.cudagraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
+        additional_kwargs = forward_context.additional_kwargs
         num_tokens = (
             ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start
         ) * 2
@@ -448,6 +460,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                additional_kwargs=additional_kwargs,
             )
             with self.sm_control:
                 return self._capture_ubatches(ubatch_metadata, self.model)
@@ -470,6 +483,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                additional_kwargs=additional_kwargs,
             )
             with self.sm_control:
                 return self._run_ubatches(ubatch_metadata, self.model)

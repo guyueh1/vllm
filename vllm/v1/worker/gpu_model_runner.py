@@ -51,6 +51,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import (
     BatchDescriptor,
+    MoETopkCapture,
     get_forward_context,
     is_forward_context_available,
     set_forward_context,
@@ -275,7 +276,8 @@ class ForwardPassTensors(NamedTuple):
     sample_hidden_states: torch.Tensor
     logits: torch.Tensor | None
     logits_indices: torch.Tensor | None
-    # One tensor per routed MoE layer, shaped [num_tokens, top_k].
+    # One tensor per routed MoE layer, shaped [num_tokens, top_k]. In cudagraph
+    # mode, these may be views into shared buffers updated by the graph.
     moe_topk_indices: list[torch.Tensor] | None
 
 
@@ -329,6 +331,14 @@ class GPUModelRunner(
         )
         # This will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
+        # MoE layer metadata for top-k routing capture.
+        self._moe_layer_ids: list[int] = []
+        self._moe_layer_id_to_index: dict[int, int] = {}
+        self._moe_topk_sizes: list[int] = []
+        self._moe_topk_dtypes: list[torch.dtype] = []
+        self._cudagraph_moe_topk_buffers: dict[
+            BatchDescriptor, list[torch.Tensor]
+        ] = {}
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -2780,6 +2790,27 @@ class GPUModelRunner(
         finally:
             self.prepare_inputs_event.record()
 
+    def _get_or_create_cudagraph_moe_topk_buffers(
+        self, batch_descriptor: BatchDescriptor
+    ) -> list[torch.Tensor] | None:
+        if not self._moe_layer_ids:
+            return None
+        buffers = self._cudagraph_moe_topk_buffers.get(batch_descriptor)
+        if buffers is None:
+            num_tokens = batch_descriptor.num_tokens
+            buffers = [
+                torch.empty(
+                    (num_tokens, topk),
+                    device=self.device,
+                    dtype=dtype,
+                )
+                for topk, dtype in zip(self._moe_topk_sizes, self._moe_topk_dtypes)
+            ]
+            # Persist buffers per batch descriptor so cudagraph replay sees
+            # stable tensor addresses.
+            self._cudagraph_moe_topk_buffers[batch_descriptor] = buffers
+        return buffers
+
     def _model_forward(
         self,
         input_ids: torch.Tensor | None = None,
@@ -2805,6 +2836,26 @@ class GPUModelRunner(
             ModelForwardOutput with hidden_states, aux_hidden_states, and
             collected MoE top-k indices (if any).
         """
+        if is_forward_context_available():
+            forward_context = get_forward_context()
+            if (
+                forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
+                and forward_context.batch_descriptor is not None
+                and self._moe_layer_id_to_index
+            ):
+                buffers = self._get_or_create_cudagraph_moe_topk_buffers(
+                    forward_context.batch_descriptor
+                )
+                if buffers is not None:
+                    # Store shared buffers so MoE layers can copy top-k ids
+                    # into them during cudagraph capture/replay.
+                    forward_context.additional_kwargs["moe_topk_capture"] = (
+                        MoETopkCapture(
+                            buffers=buffers,
+                            layer_id_to_index=self._moe_layer_id_to_index,
+                            token_offset=0,
+                        )
+                    )
         output = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -2814,11 +2865,17 @@ class GPUModelRunner(
         )
         moe_topk_indices = None
         if is_forward_context_available():
-            # MoE top-k indices are appended by the fused MoE layer as a
-            # Python-side side effect, so this list is empty during cudagraph
-            # replay (logprobs still update because they are computed later
-            # from logits outside the graph).
-            moe_topk_indices = get_forward_context().moe_topk_indices
+            forward_context = get_forward_context()
+            # In eager mode, MoE layers append per-layer tensors to the forward
+            # context. In cudagraph mode, MoE layers copy into shared buffers
+            # that we reuse to build the per-layer list below.
+            moe_topk_indices = forward_context.moe_topk_indices
+            if not moe_topk_indices:
+                moe_topk_capture = forward_context.additional_kwargs.get(
+                    "moe_topk_capture"
+                )
+                if moe_topk_capture is not None:
+                    moe_topk_indices = moe_topk_capture.buffers
         if isinstance(output, ModelForwardOutput):
             if output.moe_topk_indices is None:
                 return ModelForwardOutput(
@@ -3895,6 +3952,24 @@ class GPUModelRunner(
                 self.model = UBatchWrapper(
                     self.model, self.vllm_config, CUDAGraphMode.NONE, self.device
                 )
+
+        raw_model = self.get_model()
+        self._moe_layer_ids = []
+        self._moe_layer_id_to_index = {}
+        self._moe_topk_sizes = []
+        self._moe_topk_dtypes = []
+        self._cudagraph_moe_topk_buffers.clear()
+        if is_mixture_of_experts(raw_model):
+            # Preserve MoE-only layer ordering to match forward_context appends.
+            self._moe_layer_ids = [layer.layer_id for layer in raw_model.moe_layers]
+            self._moe_layer_id_to_index = {
+                layer_id: idx for idx, layer_id in enumerate(self._moe_layer_ids)
+            }
+            self._moe_topk_sizes = [layer.top_k for layer in raw_model.moe_layers]
+            self._moe_topk_dtypes = [
+                layer.quant_method.topk_indices_dtype or torch.int32
+                for layer in raw_model.moe_layers
+            ]
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.

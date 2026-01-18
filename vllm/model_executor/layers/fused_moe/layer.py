@@ -1663,12 +1663,26 @@ class FusedMoE(CustomOp):
 
         assert topk_ids.dtype == indices_type or indices_type is None
 
-        if is_forward_context_available() and not torch._dynamo.is_compiling():
-            # Stash router top-k indices for this layer in the forward context.
-            # This is a Python-side side effect, so it only runs in eager
-            # execution (including cudagraph capture) and is skipped during
-            # torch.compile tracing and cudagraph replay.
-            get_forward_context().moe_topk_indices.append(topk_ids)
+        if is_forward_context_available():
+            ctx = get_forward_context()
+            moe_topk_capture = ctx.additional_kwargs.get("moe_topk_capture")
+            if moe_topk_capture is not None:
+                moe_layer_idx = moe_topk_capture.layer_id_to_index.get(self.layer_id)
+                if moe_layer_idx is not None and moe_layer_idx < len(
+                    moe_topk_capture.buffers
+                ):
+                    target = moe_topk_capture.buffers[moe_layer_idx]
+                    start = moe_topk_capture.token_offset
+                    end = min(start + topk_ids.shape[0], target.shape[0])
+                    if end > start:
+                        # In-place copy so cudagraph replay updates the buffer.
+                        target[start:end].copy_(topk_ids[: end - start])
+            elif not torch._dynamo.is_compiling():
+                # Stash router top-k indices for this layer in the forward
+                # context. This is a Python-side side effect, so it only runs
+                # in eager execution and is skipped during torch.compile tracing
+                # and cudagraph replay.
+                ctx.moe_topk_indices.append(topk_ids)
 
         # Compute zero expert result if needed
         if (
