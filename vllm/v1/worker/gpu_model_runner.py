@@ -4182,16 +4182,7 @@ class GPUModelRunner(
             # even though prompt logprobs only cover prompt_len - 1 positions.
             num_prompt_tokens = len(request.prompt_token_ids)
             per_layer_tensors = in_progress_dict.get(req_id)
-            start_idx = request.num_computed_tokens
-            if start_idx >= num_prompt_tokens:
-                if per_layer_tensors is not None:
-                    # Prefill completed in a prior step; return the cached
-                    # prompt MoE indices once and avoid reinitializing zeros.
-                    completed_prefill_reqs.append(req_id)
-                    prompt_moe_topk_indices_dict[req_id] = per_layer_tensors
-                continue
-
-            if per_layer_tensors is None:
+            if not per_layer_tensors:
                 per_layer_tensors = [
                     torch.zeros(
                         (num_prompt_tokens, topk_ids.shape[-1]),
@@ -4202,6 +4193,7 @@ class GPUModelRunner(
                 ]
                 in_progress_dict[req_id] = per_layer_tensors
 
+            start_idx = request.num_computed_tokens
             num_remaining_tokens = num_prompt_tokens - start_idx
             if num_tokens <= num_remaining_tokens:
                 num_copy_tokens = num_tokens
