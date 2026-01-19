@@ -269,7 +269,7 @@ class ExecuteModelState(NamedTuple):
     cudagraph_stats: CUDAGraphStat | None
 
 
-class ForwardPassTensors(NamedTuple):
+class ModelForwardTensors(NamedTuple):
     """Intermediate tensors from model forward through logits projection."""
 
     hidden_states: torch.Tensor
@@ -281,18 +281,12 @@ class ForwardPassTensors(NamedTuple):
     moe_topk_indices: list[torch.Tensor] | None
 
 
-class ModelStepTensors(NamedTuple):
-    """Intermediate tensors spanning forward + sampling logprobs."""
-
-    forward_tensors: ForwardPassTensors
-
-
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
 
     scheduler_output: "SchedulerOutput"
-    forward_tensors: ForwardPassTensors
+    forward_tensors: ModelForwardTensors
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: CommonAttentionMetadata | None
     aux_hidden_states: list[torch.Tensor] | None
@@ -2641,7 +2635,7 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         sampler_output: SamplerOutput,
-        step_tensors: ModelStepTensors,
+        forward_tensors: ModelForwardTensors,
         num_scheduled_tokens: int,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
@@ -2658,7 +2652,7 @@ class GPUModelRunner(
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(
-                step_tensors.forward_tensors.logits
+                forward_tensors.logits
             )
 
         num_reqs = self.input_batch.num_reqs
@@ -2760,17 +2754,17 @@ class GPUModelRunner(
 
         # Compute prompt logprobs if needed.
         moe_topk_lists = self._get_moe_topk_lists(
-            step_tensors,
+            forward_tensors,
             sampler_output,
             spec_decode_metadata,
             discard_sampled_tokens_req_indices,
         )
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-            step_tensors.forward_tensors.hidden_states[:num_scheduled_tokens],
+            forward_tensors.hidden_states[:num_scheduled_tokens],
             scheduler_output.num_scheduled_tokens,
         )
         prompt_moe_topk_indices_dict = self._get_prompt_moe_topk_indices_dict(
-            step_tensors.forward_tensors.moe_topk_indices,
+            forward_tensors.moe_topk_indices,
             scheduler_output.num_scheduled_tokens,
         )
 
@@ -3358,7 +3352,7 @@ class GPUModelRunner(
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
-        forward_tensors = ForwardPassTensors(
+        forward_tensors = ModelForwardTensors(
             hidden_states=hidden_states,
             sample_hidden_states=sample_hidden_states,
             logits=logits,
@@ -3425,11 +3419,6 @@ class GPUModelRunner(
             # Sampler turns logits into sampled token ids and optional
             # logprobs tensors for downstream serialization.
             sampler_output = self._sample(logits, spec_decode_metadata)
-        step_tensors = ModelStepTensors(
-            # Attach sampler logprobs to the forward-pass tensors so downstream
-            # bookkeeping can consume a single combined view.
-            forward_tensors=forward_tensors,
-        )
 
         self.input_batch.prev_sampled_token_ids = None
 
@@ -3505,7 +3494,7 @@ class GPUModelRunner(
             ) = self._bookkeeping_sync(
                 scheduler_output,
                 sampler_output,
-                step_tensors,
+                forward_tensors,
                 scheduler_output.total_num_scheduled_tokens,
                 spec_decode_metadata,
             )
@@ -4023,13 +4012,13 @@ class GPUModelRunner(
 
     def _get_moe_topk_lists(
         self,
-        step_tensors: ModelStepTensors,
+        forward_tensors: ModelForwardTensors,
         sampler_output: SamplerOutput,
         spec_decode_metadata: SpecDecodeMetadata | None,
         discard_req_indices: Sequence[int] = (),
     ) -> MoETopkLists | None:
-        moe_topk_indices = step_tensors.forward_tensors.moe_topk_indices
-        logits_indices = step_tensors.forward_tensors.logits_indices
+        moe_topk_indices = forward_tensors.moe_topk_indices
+        logits_indices = forward_tensors.logits_indices
         if not moe_topk_indices or logits_indices is None:
             return None
 
