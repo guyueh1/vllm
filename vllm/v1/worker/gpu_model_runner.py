@@ -2759,11 +2759,8 @@ class GPUModelRunner(
             spec_decode_metadata,
             discard_sampled_tokens_req_indices,
         )
-        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+        prompt_logprobs_dict, prompt_moe_topk_indices_dict = self._get_prompt_logprobs_dict(
             forward_tensors.hidden_states[:num_scheduled_tokens],
-            scheduler_output.num_scheduled_tokens,
-        )
-        prompt_moe_topk_indices_dict = self._get_prompt_moe_topk_indices_dict(
             forward_tensors.moe_topk_indices,
             scheduler_output.num_scheduled_tokens,
         )
@@ -4049,14 +4046,17 @@ class GPUModelRunner(
     def _get_prompt_logprobs_dict(
         self,
         hidden_states: torch.Tensor,
+        moe_topk_indices: list[torch.Tensor] | None,
         num_scheduled_tokens: dict[str, int],
-    ) -> dict[str, LogprobsTensors | None]:
+    ) -> tuple[dict[str, LogprobsTensors | None], dict[str, list[torch.Tensor]]]:
         num_prompt_logprobs_dict = self.num_prompt_logprobs
-        if not num_prompt_logprobs_dict:
-            return {}
+        # if not num_prompt_logprobs_dict:
+        #     return {}
 
         in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
+        in_progress_moe_topk_indices_dict = self.input_batch.in_progress_moe_topk_indices_cpu
         prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
+        prompt_moe_topk_indices_dict: dict[str, list[torch.Tensor]] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
@@ -4080,6 +4080,7 @@ class GPUModelRunner(
 
             # Set up target LogprobsTensors object.
             logprobs_tensors = in_progress_dict.get(req_id)
+            per_layer_tensors = in_progress_moe_topk_indices_dict.get(req_id)
             if not logprobs_tensors:
                 # Create empty logprobs CPU tensors for the entire prompt.
                 # If chunked, we'll copy in slice by slice.
@@ -4087,6 +4088,16 @@ class GPUModelRunner(
                     num_prompt_tokens - 1, num_prompt_logprobs + 1
                 )
                 in_progress_dict[req_id] = logprobs_tensors
+            if not per_layer_tensors:
+                per_layer_tensors = [
+                    torch.zeros(
+                        (num_prompt_tokens - 1, topk_ids.shape[-1]),
+                        dtype=topk_ids.dtype,
+                        device="cpu",
+                    )
+                    for topk_ids in moe_topk_indices
+                ]
+                in_progress_moe_topk_indices_dict[req_id] = per_layer_tensors
 
             # Determine number of logits to retrieve.
             start_idx = request.num_computed_tokens
@@ -4103,6 +4114,7 @@ class GPUModelRunner(
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
                 prompt_logprobs_dict[req_id] = logprobs_tensors
+                prompt_moe_topk_indices_dict[req_id] = per_layer_tensors
 
             if num_logits <= 0:
                 # This can happen for the final chunk if we prefilled exactly
@@ -4141,18 +4153,26 @@ class GPUModelRunner(
             logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
                 ranks, non_blocking=True
             )
+            for layer_idx, topk_ids in enumerate(moe_topk_indices):
+                # Copy this step's MoE top-k ids into the preallocated
+                # [prompt_len, top_k] tensors for the request.
+                per_layer_tensors[layer_idx][chunk_slice].copy_(
+                    topk_ids[offset : offset + num_logits],
+                    non_blocking=True,
+                )
 
         # Remove requests that have completed prefill from the batch
         # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
             del num_prompt_logprobs_dict[req_id]
             del in_progress_dict[req_id]
+            del in_progress_moe_topk_indices_dict[req_id]
 
         # Must synchronize the non-blocking GPU->CPU transfers.
         if prompt_logprobs_dict:
             self._sync_device()
 
-        return prompt_logprobs_dict
+        return prompt_logprobs_dict, prompt_moe_topk_indices_dict
 
     def _get_prompt_moe_topk_indices_dict(
         self,
