@@ -137,47 +137,14 @@ class RequestState:
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
+        # The first sampled token comes from logits at the last prompt token,
+        # so the initial generation MoE row duplicates prompt[-1].
         self.moe_topk_indices: list[np.ndarray] | None = None
         self.prompt_moe_topk_indices: list[torch.Tensor] | None = None
-        # The first sampled token comes from logits at the last prompt token,
-        # so the initial generation MoE row duplicates prompt[-1]. We drop
-        # that row once prompt MoE indices are available.
-        self._should_drop_first_gen_moe_topk = False
-        self._dropped_first_gen_moe_topk = False
 
     def update_moe_topk_from_output(self, output: EngineCoreOutput) -> None:
-        if output.new_prompt_moe_topk_indices is not None:
-            self.prompt_moe_topk_indices = output.new_prompt_moe_topk_indices
-            if not self._should_drop_first_gen_moe_topk:
-                has_prompt_positions = any(
-                    layer.shape[0] > 0 for layer in output.new_prompt_moe_topk_indices
-                )
-                if has_prompt_positions:
-                    self._should_drop_first_gen_moe_topk = True
-            if (
-                self._should_drop_first_gen_moe_topk
-                and not self._dropped_first_gen_moe_topk
-                and self.moe_topk_indices
-                and self.moe_topk_indices[0].shape[0] > 0
-            ):
-                # The prefill step already appended a generation row for the
-                # last prompt token (position P-1); drop it here so generated
-                # MoE indices start at position P.
-                self.moe_topk_indices = [layer[:-1] for layer in self.moe_topk_indices]
-                self._dropped_first_gen_moe_topk = True
-
         if output.new_moe_topk_indices is not None:
             per_layer = output.new_moe_topk_indices.topk_ids_per_layer
-            if (
-                self._should_drop_first_gen_moe_topk
-                and not self._dropped_first_gen_moe_topk
-                and per_layer
-                and per_layer[0].shape[0] > 0
-            ):
-                # Prompt MoE indices arrived before any generation rows were
-                # stored; drop the current first row instead.
-                per_layer = [layer[1:] for layer in per_layer]
-                self._dropped_first_gen_moe_topk = True
             if self.moe_topk_indices is None:
                 self.moe_topk_indices = [layer.copy() for layer in per_layer]
             else:
@@ -185,6 +152,8 @@ class RequestState:
                     np.concatenate([prev, layer], axis=0)
                     for prev, layer in zip(self.moe_topk_indices, per_layer)
                 ]
+        if output.new_prompt_moe_topk_indices is not None:
+            self.prompt_moe_topk_indices = output.new_prompt_moe_topk_indices
 
     def pop_prompt_moe_topk_indices(self) -> list[torch.Tensor] | None:
         pmti = self.prompt_moe_topk_indices
