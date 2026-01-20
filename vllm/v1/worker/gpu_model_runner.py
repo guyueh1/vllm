@@ -3961,7 +3961,7 @@ class GPUModelRunner(
             }
             self._moe_topk_sizes = [layer.top_k for layer in raw_model.moe_layers]
             self._moe_topk_dtypes = [
-                layer.quant_method.topk_indices_dtype or torch.int32
+                layer.quant_method.topk_indices_dtype or torch.int16
                 for layer in raw_model.moe_layers
             ]
 

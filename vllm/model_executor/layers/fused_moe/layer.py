@@ -1682,7 +1682,7 @@ class FusedMoE(CustomOp):
                 # context. This is a Python-side side effect, so it only runs
                 # in eager execution and is skipped during torch.compile tracing
                 # and cudagraph replay.
-                ctx.moe_topk_indices.append(topk_ids)
+                ctx.moe_topk_indices.append(topk_ids.to(dtype=torch.int16))
 
         # Compute zero expert result if needed
         if (
