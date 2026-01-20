@@ -310,14 +310,6 @@ class RequestState:
         if prompt_moe_topk_indices:
             # Stack per-layer tensors into [prompt_len, num_layers, top_k],
             # aligning prompt MoE indices with prompt token positions.
-            if False:
-                prompt_moe_topk_indices = np.stack(
-                    [
-                        layer.to(torch.int32).cpu().numpy()
-                        for layer in prompt_moe_topk_indices
-                    ],
-                    axis=1,
-                )
             prompt_moe_topk_indices = torch.stack(prompt_moe_topk_indices, dim=1).cpu().numpy()
 
         # If prompt embeds were used, put placeholder prompt token ids
