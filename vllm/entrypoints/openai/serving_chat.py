@@ -1388,7 +1388,11 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
-        # prompt_moe_topk_indices = None
+        prompt_moe_topk_indices = (
+            final_res.prompt_moe_topk_indices.tolist()
+            if final_res.prompt_moe_topk_indices is not None else None
+        )
+        prompt_moe_topk_indices_append_end = False
         # logger.info(f"chat_completion_full_generator: prompt moe topk is None? {final_res.prompt_moe_topk_indices is None}")
 
         choices: list[ChatCompletionResponseChoice] = []
@@ -1455,6 +1459,15 @@ class OpenAIServingChat(OpenAIServing):
                         content=content,
                     )
 
+                moe_topk_indices = output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
+                if moe_topk_indices:
+                    prompt_moe_topk_indices.append(
+                        moe_topk_indices[0]
+                    )
+                    moe_topk_indices = moe_topk_indices[1:]
+                    if not prompt_moe_topk_indices_append_end:
+                        prompt_moe_topk_indices_append_end = True
+
                 choice_data = ChatCompletionResponseChoice(
                     index=output.index,
                     message=message,
@@ -1470,9 +1483,7 @@ class OpenAIServingChat(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
-                    moe_topk_indices=(
-                        output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
-                    ),
+                    moe_topk_indices=moe_topk_indices,
                 )
                 choices.append(choice_data)
                 continue
@@ -1618,6 +1629,15 @@ class OpenAIServingChat(OpenAIServing):
                 and output.finish_reason == "stop"
             )
 
+            moe_topk_indices = output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
+            if moe_topk_indices:
+                prompt_moe_topk_indices.append(
+                    moe_topk_indices[0]
+                )
+                moe_topk_indices = moe_topk_indices[1:]
+                if not prompt_moe_topk_indices_append_end:
+                    prompt_moe_topk_indices_append_end = True
+
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
@@ -1631,9 +1651,7 @@ class OpenAIServingChat(OpenAIServing):
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
-                moe_topk_indices=(
-                    output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
-                ),
+                moe_topk_indices=moe_topk_indices,
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
@@ -1683,11 +1701,7 @@ class OpenAIServingChat(OpenAIServing):
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
-            prompt_moe_topk_indices=(
-                final_res.prompt_moe_topk_indices.tolist()
-                if final_res.prompt_moe_topk_indices is not None
-                else None
-            ),
+            prompt_moe_topk_indices=prompt_moe_topk_indices,
             kv_transfer_params=final_res.kv_transfer_params,
         )
 
