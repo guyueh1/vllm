@@ -78,6 +78,8 @@ class Sampler(nn.Module):
         # is used for sampling (after penalties and temperature scaling).
         num_logprobs = sampling_metadata.max_num_logprobs
         if num_logprobs is not None:
+            # Logits already come from hidden_states upstream; eager vs
+            # compiled/cudagraph does not change the logprobs math here.
             if logprobs_mode == "raw_logprobs":
                 # Convert logits -> logprobs before top-k gathering.
                 raw_logprobs = self.compute_logprobs(logits)

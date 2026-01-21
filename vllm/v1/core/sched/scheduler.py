@@ -1175,6 +1175,8 @@ class Scheduler(SchedulerInterface):
                 and request.sampling_params.logprobs is not None
                 and logprobs
             ):
+                # Shared path: slice per-request logprobs from the batch output,
+                # independent of eager vs compiled/cudagraph execution.
                 # Slice the batch logprobs from ModelRunnerOutput down to this
                 # request's newly generated positions for EngineCoreOutput.
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))

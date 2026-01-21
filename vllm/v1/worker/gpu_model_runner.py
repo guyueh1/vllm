@@ -2605,6 +2605,7 @@ class GPUModelRunner(
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> SamplerOutput:
         # Sample the next token and compute logprobs tensors if requested.
+        # This path is identical for eager vs compiled/cudagraph.
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
             # Update output token ids with tokens sampled in last step
@@ -2737,8 +2738,9 @@ class GPUModelRunner(
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        # Logprobs are produced on-device by the sampler and
-        # converted to lists for ModelRunnerOutput serialization.
+        # Logprobs are produced on-device by the sampler from logits; the
+        # eager vs compiled/cudagraph choice does not change this path.
+        # Convert to CPU lists for ModelRunnerOutput serialization.
         logprobs_lists = (
             logprobs_tensors.tolists(cu_num_tokens)
             if not self.use_async_scheduling and logprobs_tensors is not None
@@ -2882,6 +2884,7 @@ class GPUModelRunner(
         if isinstance(output, tuple):
             # In compiled/cudagraph dummy runs, ModelForwardOutput
             # can be returned as a plain tuple, losing its NamedTuple type.
+            # Normalize here so downstream logprobs see a consistent shape.
             if len(output) == 2:
                 hidden_states, aux_hidden_states = output
                 output_moe_topk_indices = None
@@ -3310,12 +3313,18 @@ class GPUModelRunner(
                     return output
 
                 # Gather token positions to score and project to logits.
+                # Shared logprobs path: logits come from hidden_states at
+                # logits_indices; cudagraph/compile only change how
+                # hidden_states were produced.
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
 
+                # Shared logprobs path: logits come from hidden_states at
+                # logits_indices; cudagraph/compile only change how
+                # hidden_states were produced before this point.
                 sample_hidden_states = hidden_states[logits_indices]
                 if not get_pp_group().is_last_rank:
                     all_gather_tensors = {
@@ -4121,6 +4130,8 @@ class GPUModelRunner(
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc.np[req_idx].item()
             prompt_hidden_states = hidden_states[offset : offset + num_logits]
+            # Prompt logprobs come from prefill hidden_states; eager vs
+            # compiled/cudagraph only affects how those hidden_states were made.
             logits = self.model.compute_logits(prompt_hidden_states)
 
             # Get the "target" tokens for each index. For prompt at index i,

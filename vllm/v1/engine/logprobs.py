@@ -184,6 +184,7 @@ class LogprobsProcessor:
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
         # EngineCoreOutput carries per-request logprob slices from the scheduler.
+        # This conversion is identical across eager and compiled/cudagraph modes.
         if output.new_logprobs is not None:
             self._update_sample_logprobs(output.new_logprobs)
         if output.new_prompt_logprobs_tensors is not None:
