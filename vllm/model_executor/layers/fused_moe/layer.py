@@ -682,6 +682,13 @@ class FusedMoE(CustomOp):
         return None
 
     @property
+    def layer_id(self):
+        # Delayed import to avoid circular dependency
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        return extract_layer_index(self.layer_name)
+
+    @property
     def gate(self) -> torch.nn.Module | None:
         return None
 
