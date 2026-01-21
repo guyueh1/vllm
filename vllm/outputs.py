@@ -6,6 +6,7 @@ from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
 from typing import Any, Generic
 
+import numpy as np
 import torch
 from typing_extensions import TypeVar
 
