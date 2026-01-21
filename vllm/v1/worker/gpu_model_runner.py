@@ -257,19 +257,6 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         return output
 
 
-class ExecuteModelState(NamedTuple):
-    """Ephemeral cached state transferred between execute_model() and
-    sample_tokens(), after execute_model() returns None."""
-
-    scheduler_output: "SchedulerOutput"
-    forward_tensors: "ForwardPassTensors"
-    spec_decode_metadata: SpecDecodeMetadata | None
-    spec_decode_common_attn_metadata: CommonAttentionMetadata | None
-    aux_hidden_states: list[torch.Tensor] | None
-    ec_connector_output: ECConnectorOutput | None
-    cudagraph_stats: CUDAGraphStat | None
-
-
 class ModelForwardTensors(NamedTuple):
     """Intermediate tensors from model forward through logits projection."""
 
