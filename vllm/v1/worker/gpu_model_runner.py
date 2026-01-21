@@ -2853,6 +2853,8 @@ class GPUModelRunner(
                             token_offset=0,
                         )
                     )
+        # Forward call is eager when cudagraph_runtime_mode=NONE; otherwise it
+        # may be compiled/cudagraph-wrapped and replayed to produce hidden_states.
         output = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -2969,6 +2971,8 @@ class GPUModelRunner(
         )
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        # Eager path uses CUDAGraphMode.NONE; compiled/cudagraph path uses the
+        # dispatcher to pick runtime mode and padded batch shapes for replay.
         dispatch_cudagraph = (
             lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
@@ -3259,6 +3263,9 @@ class GPUModelRunner(
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
+        # Eager path: cudagraph_runtime_mode=NONE runs a direct forward.
+        # CUDAGraph/compiled path: runtime mode + batch_descriptor enable
+        # capture/replay on padded shapes while still producing hidden_states.
         with (
             set_forward_context(
                 attn_metadata,
@@ -3924,6 +3931,8 @@ class GPUModelRunner(
         ):
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
             compilation_counter.stock_torch_compile_count += 1
+            # Compiled path: forward (and hidden_states) come from a
+            # torch.compile graph instead of eager execution.
             self.model.compile(fullgraph=True, backend=backend)
             return
         # for other compilation modes, cudagraph behavior is controlled by
@@ -3936,6 +3945,8 @@ class GPUModelRunner(
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
+            # CUDAGraph path: forward (and hidden_states) may be captured/replayed
+            # via the wrapper when cudagraph_runtime_mode is enabled.
             self.model = CUDAGraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )
