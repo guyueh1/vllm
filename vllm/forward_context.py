@@ -183,6 +183,15 @@ class DPMetadata:
 
 
 @dataclass
+class MoETopkCapture:
+    """Shared buffers for capturing per-layer MoE top-k ids inside a cudagraph."""
+
+    buffers: list[torch.Tensor]
+    layer_id_to_index: dict[int, int]
+    token_offset: int = 0
+
+
+@dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
@@ -204,6 +213,9 @@ class ForwardContext:
     batch_descriptor: BatchDescriptor | None = None
 
     ubatch_slices: UBatchSlices | None = None
+
+    # Collect per-MoE-layer top-k expert indices during the forward pass.
+    moe_topk_indices: list[torch.Tensor] = field(default_factory=list)
 
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.valid_runtime_modes(), (

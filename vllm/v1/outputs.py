@@ -89,6 +89,22 @@ class LogprobsTensors(NamedTuple):
         )
 
 
+class MoETopkLists(NamedTuple):
+    # Per-layer top-k indices, each shaped [num_tokens, top_k].
+    topk_ids_per_layer: list[np.ndarray]
+    # Optional flattened offsets for variable-length outputs.
+    cu_num_generated_tokens: list[int] | None = None
+
+    def slice_request(self, req_idx: int, num_positions: int) -> "MoETopkLists":
+        if self.cu_num_generated_tokens is not None:
+            req_idx = self.cu_num_generated_tokens[req_idx]
+        end_idx = req_idx + num_positions
+        return MoETopkLists(
+            [layer[req_idx:end_idx] for layer in self.topk_ids_per_layer],
+            None,
+        )
+
+
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
 PoolerOutput = list[torch.Tensor | None] | torch.Tensor | None
@@ -156,16 +172,34 @@ class ModelRunnerOutput:
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
-    logprobs: LogprobsLists | None
+    # Produced in the model runner (CPU lists) and sliced per-request in
+    # the scheduler into EngineCoreOutput.new_logprobs.
+    logprobs: LogprobsLists | None = None
+
+    # Per-layer top-k MoE indices for the sampled tokens in this step.
+    # Sliced per-request in the scheduler into EngineCoreOutput.new_moe_topk_indices.
+    moe_topk_indices: MoETopkLists | None = None
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
-    prompt_logprobs_dict: dict[str, LogprobsTensors | None]
+    # Prompt logprobs stay as tensors until they are attached to
+    # EngineCoreOutput.new_prompt_logprobs_tensors and processed in the engine.
+    prompt_logprobs_dict: dict[str, LogprobsTensors | None] = field(
+        default_factory=dict
+    )
+
+    # Per-request MoE top-k indices for prompt tokens, accumulated across
+    # chunked prefill steps.
+    prompt_moe_topk_indices_dict: dict[str, list[torch.Tensor]] = field(
+        default_factory=dict
+    )
 
     # [num_reqs, hidden_size]
-    pooler_output: list[torch.Tensor | None]
+    pooler_output: list[torch.Tensor | None] = field(
+        default_factory=list
+    )
 
     kv_connector_output: KVConnectorOutput | None = None
 

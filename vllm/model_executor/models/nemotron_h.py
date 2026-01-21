@@ -53,6 +53,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_outputs import ModelForwardOutput
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -243,6 +244,8 @@ class NemotronHMoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         # router_logits: (num_tokens, n_experts)
+        # Router logits feed the shared fused MoE router, which computes
+        # top-k expert indices inside FusedMoE._select_experts.
         router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
         shared_output = None
         if self.use_latent_moe:
@@ -250,6 +253,8 @@ class NemotronHMoE(nn.Module):
                 shared_output = self.shared_experts(hidden_states)
             hidden_states, _ = self.fc1_latent_proj(hidden_states)
 
+        # SharedFusedMoE forwards router_logits into the fused MoE kernels,
+        # producing top-k expert ids and weights for each token.
         fused_moe_out = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
@@ -900,7 +905,11 @@ class NemotronHForCausalLM(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
 
-        return hidden_states
+        return ModelForwardOutput(
+            hidden_states=hidden_states,
+            aux_hidden_states=None,
+            moe_topk_indices=None,
+        )
 
     def compute_logits(
         self,

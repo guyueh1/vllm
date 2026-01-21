@@ -8,6 +8,7 @@ from functools import partial
 from typing import Literal, cast, get_args, overload
 
 import torch
+import torch._dynamo
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
@@ -23,7 +24,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.eplb.eplb_state import EplbState
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -1689,6 +1694,8 @@ class FusedMoE(CustomOp):
                     routed_scaling_factor=self.routed_scaling_factor,
                 )
 
+            # NemotronH uses grouped_topk, which computes top-k expert ids
+            # within expert groups and returns the final top-k indices.
             topk_weights, topk_ids = grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
@@ -1705,6 +1712,7 @@ class FusedMoE(CustomOp):
             if self.routed_scaling_factor != 1.0:
                 topk_weights *= self.routed_scaling_factor
         elif self.custom_routing_function is None:
+            # Default path: fused topk kernel returns per-token top-k ids.
             topk_weights, topk_ids, token_expert_indices = fused_topk(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
@@ -1732,6 +1740,27 @@ class FusedMoE(CustomOp):
             topk_ids = topk_ids.to(dtype=indices_type)
 
         assert topk_ids.dtype == indices_type or indices_type is None
+
+        if is_forward_context_available():
+            ctx = get_forward_context()
+            moe_topk_capture = ctx.additional_kwargs.get("moe_topk_capture")
+            if moe_topk_capture is not None:
+                moe_layer_idx = moe_topk_capture.layer_id_to_index.get(self.layer_id)
+                if moe_layer_idx is not None and moe_layer_idx < len(
+                    moe_topk_capture.buffers
+                ):
+                    target = moe_topk_capture.buffers[moe_layer_idx]
+                    start = moe_topk_capture.token_offset
+                    end = min(start + topk_ids.shape[0], target.shape[0])
+                    if end > start:
+                        # In-place copy so cudagraph replay updates the buffer.
+                        target[start:end].copy_(topk_ids[: end - start])
+            elif not torch._dynamo.is_compiling():
+                # Stash router top-k indices for this layer in the forward
+                # context. This is a Python-side side effect, so it only runs
+                # in eager execution and is skipped during torch.compile tracing
+                # and cudagraph replay.
+                ctx.moe_topk_indices.append(topk_ids.to(dtype=torch.int16))
 
         return topk_weights, topk_ids
 
