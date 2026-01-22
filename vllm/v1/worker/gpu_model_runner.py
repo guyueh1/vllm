@@ -51,6 +51,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import (
     BatchDescriptor,
+    MoEMetadata,
     set_forward_context,
 )
 from vllm.logger import init_logger
@@ -351,6 +352,8 @@ class GPUModelRunner(
             self.max_encoder_len = scheduler_config.max_num_encoder_input_tokens
         else:
             self.max_encoder_len = 0
+
+        self.moe_metadata: MoEMetadata | None = None
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
@@ -3134,6 +3137,7 @@ class GPUModelRunner(
             set_forward_context(
                 attn_metadata,
                 self.vllm_config,
+                moe_metadata=self.moe_metadata,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_mode,
@@ -3737,7 +3741,11 @@ class GPUModelRunner(
             and mm_config.is_multimodal_pruning_enabled()
         )
 
-        if is_mixture_of_experts(self.model) and self.parallel_config.enable_eplb:
+        is_moe = is_mixture_of_experts(self.model)
+        if is_moe:
+            self.moe_metadata = MoEMetadata.make(self.model, self.model_config)
+            logger.info_once(f"MoEMetadata: num moe layers = {self.moe_metadata.num_moe_layers} topk = {self.moe_metadata.topk}")
+        if is_moe and self.parallel_config.enable_eplb:
             logger.info_once("EPLB is enabled for model %s.", self.model_config.model)
             global_expert_load = (
                 global_expert_loads[eplb_models] if global_expert_loads else None
@@ -4263,6 +4271,7 @@ class GPUModelRunner(
                 set_forward_context(
                     attn_metadata,
                     self.vllm_config,
+                    moe_metadata=self.moe_metadata,
                     num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
