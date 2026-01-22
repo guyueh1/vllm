@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from vllm.logger import init_logger
 from vllm.logprobs import (
@@ -36,6 +36,9 @@ class LogprobsProcessor:
     cumulative_logprob: float | None
     num_logprobs: int | None
     num_prompt_logprobs: int | None
+
+    sample_moe_topk_indices: list | None = field(default_factory=list)
+    prompt_moe_topk_indices: list | None = field(default_factory=list)
 
     @classmethod
     def from_new_request(
@@ -79,14 +82,18 @@ class LogprobsProcessor:
         assert self.logprobs is not None
         assert self.cumulative_logprob is not None
 
-        token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
+        token_ids_lst = logprobs_lists.logprob_token_ids
+        logprobs_lst = logprobs_lists.logprobs
+        ranks_lst = logprobs_lists.sampled_token_ranks
+        moe_topk_indices_lst = logprobs_lists.moe_topk_indices
 
-        for rank_np, logprobs_np, token_ids_np in zip(
-            ranks_lst, logprobs_lst, token_ids_lst
+        for rank_np, logprobs_np, token_ids_np, moe_topk_indices_np in zip(
+            ranks_lst, logprobs_lst, token_ids_lst, moe_topk_indices_lst
         ):
             rank = rank_np.tolist()
             logprobs = logprobs_np.tolist()
             token_ids = token_ids_np.tolist()
+            moe_topk_indices = moe_topk_indices_np.tolist()
             # Detokenize (non-incrementally).
             decoded_tokens = (
                 NONES
@@ -108,6 +115,8 @@ class LogprobsProcessor:
                 self.num_logprobs,
             )
 
+            self.sample_moe_topk_indices.append(moe_topk_indices)
+
     def _update_prompt_logprobs(
         self,
         prompt_logprobs_tensors: LogprobsTensors,
@@ -124,7 +133,10 @@ class LogprobsProcessor:
         assert self.num_prompt_logprobs is not None
         assert self.prompt_logprobs is not None
 
-        token_ids, logprobs, ranks = prompt_logprobs_tensors
+        token_ids = prompt_logprobs_tensors.logprob_token_ids
+        logprobs = prompt_logprobs_tensors.logprobs
+        ranks = prompt_logprobs_tensors.selected_token_ranks
+        moe_topk_indices = prompt_logprobs_tensors.moe_topk_indices
 
         # Detokenize non-incrementally.
         # Output is flat: [num_tok, num_lps] -> [num_tok * num_lps]
@@ -143,6 +155,7 @@ class LogprobsProcessor:
         prompt_token_ranks = ranks.tolist()
         prompt_logprobs = logprobs.tolist()
         token_ids = token_ids.tolist()
+        prompt_moe_topk_indices = moe_topk_indices.tolist()
 
         # Make Logprob for each position.
         for pos in range(num_prompt_tokens):
@@ -163,6 +176,10 @@ class LogprobsProcessor:
                 self.num_prompt_logprobs,
             )
 
+            self.prompt_moe_topk_indices.append(
+                prompt_moe_topk_indices[pos]
+            )
+
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
         """Pop and return all request prompt logprobs
 
@@ -180,6 +197,25 @@ class LogprobsProcessor:
         plp = self.prompt_logprobs
         if plp:
             self.prompt_logprobs = []
+        return plp
+
+    def pop_prompt_moe_topk_indices(self):
+        """Pop and return all request prompt logprobs
+
+        The logprobs processor aggregates prompt chunk logprobs
+        over one or more prefill chunks. This method returns
+        all prompt logprobs at once and then forgets them.
+        Ensures correct RequestOutputKind.DELTA semantics
+        wherein all prompt logprobs are returned at once at
+        the end of prefill.
+
+        Returns:
+          None if prompt logprobs are disabled for this request.
+          List of all prompt logprobs, otherwise.
+        """
+        plp = self.prompt_moe_topk_indices
+        if plp:
+            self.prompt_moe_topk_indices = []
         return plp
 
     def update_from_output(self, output: EngineCoreOutput) -> None:

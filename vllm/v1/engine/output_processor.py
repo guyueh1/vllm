@@ -303,12 +303,14 @@ class RequestState:
         if self.output_kind == RequestOutputKind.DELTA:
             # Side effect: logprobs processor forgets prompt logprobs
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
-            prompt_moe_topk_indices = self.pop_prompt_moe_topk_indices()
+            # prompt_moe_topk_indices = self.pop_prompt_moe_topk_indices()
+            prompt_moe_topk_indices = self.logprobs_processor.pop_prompt_moe_topk_indices()
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
-            prompt_moe_topk_indices = self.prompt_moe_topk_indices
+            # prompt_moe_topk_indices = self.prompt_moe_topk_indices
+            prompt_moe_topk_indices = self.logprobs_processor.prompt_moe_topk_indices
 
-        if prompt_moe_topk_indices:
+        if False and prompt_moe_topk_indices:
             # Stack per-layer tensors into [prompt_len, num_layers, top_k],
             # aligning prompt MoE indices with prompt token positions.
             prompt_moe_topk_indices = torch.stack(prompt_moe_topk_indices, dim=1).cpu().numpy()

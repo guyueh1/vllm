@@ -64,6 +64,7 @@ class RejectionSampler(nn.Module):
         # [num_tokens + batch_size, vocab_size]
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        sample_moe_topk_indices: list[torch.Tensor] | None = None,
     ) -> SamplerOutput:
         """
         Args:
@@ -159,6 +160,7 @@ class RejectionSampler(nn.Module):
                 target_logits if self.is_processed_logprobs_mode else raw_target_logits,
                 bonus_sampler_output.logprobs_tensors.logprobs,
                 output_token_ids,
+                sample_moe_topk_indices,
             )
 
         return SamplerOutput(
@@ -174,6 +176,7 @@ class RejectionSampler(nn.Module):
         target_logits: torch.Tensor,
         bonus_logits: torch.Tensor,
         sampled_token_ids: torch.Tensor,
+        sample_moe_topk_indices: torch.Tensor | None = None,
     ) -> LogprobsTensors:
         cu_num_sampled_tokens = torch.zeros_like(metadata.cu_num_sampled_tokens)
         cu_num_sampled_tokens[1:] = metadata.cu_num_sampled_tokens[:-1]
@@ -205,6 +208,7 @@ class RejectionSampler(nn.Module):
             accepted_logprobs,
             max_num_logprobs,
             accepted_tokens.to(torch.int64),
+            sample_moe_topk_indices=sample_moe_topk_indices,
         )
 
     @staticmethod

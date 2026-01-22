@@ -1199,7 +1199,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             combined_selected_tokens.append(selected_token_ids)
             if tpu_sampling_metadata.logprobs:
-                combined_logprobs.append(logprobs.tolists())
+                combined_logprobs.append(logprobs.tolists_cpu())
 
             start_index = end_index
 

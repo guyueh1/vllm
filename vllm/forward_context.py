@@ -246,6 +246,7 @@ class ForwardContext:
 
     # Collect per-MoE-layer top-k expert indices during the forward pass.
     moe_topk_indices: list[torch.Tensor] = field(default_factory=list)
+    moe_topk_indices_tensor: torch.Tensor | None = None
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
@@ -280,6 +281,7 @@ def create_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
+    moe_topk_indices_tensor: torch.Tensor | None = None,
     additional_kwargs: dict[str, Any] | None = None,
 ):
     return ForwardContext(
@@ -291,6 +293,7 @@ def create_forward_context(
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
+        moe_topk_indices_tensor=moe_topk_indices_tensor,
         additional_kwargs=additional_kwargs or {},
     )
 
@@ -321,6 +324,7 @@ def set_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
+    device: Any = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -352,6 +356,19 @@ def set_forward_context(
             vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
         )
 
+    moe_topk_indices_tensor = None
+    if False and (
+        moe_metadata is not None and
+        moe_metadata.num_moe_layers is not None and
+        moe_metadata.topk is not None
+    ):
+        # logger.info(f"set_forward_context: moe: ntokens={num_tokens} nlayers={moe_metadata.num_moe_layers} topk={moe_metadata.topk} device={device}")
+        moe_topk_indices_tensor = torch.empty(
+            (moe_metadata.num_moe_layers, num_tokens, moe_metadata.topk),
+            dtype=torch.int16,
+            device=device,
+        )
+
     # Convenience: if cudagraph is used and num_tokens is given, we can just
     # create a batch descriptor here if not given (there's no harm since if it
     # doesn't match in the wrapper it'll fall through).
@@ -378,6 +395,7 @@ def set_forward_context(
         cudagraph_runtime_mode,
         batch_descriptor,
         ubatch_slices,
+        moe_topk_indices_tensor,
         additional_kwargs,
     )
 

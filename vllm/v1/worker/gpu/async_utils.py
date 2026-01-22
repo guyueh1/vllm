@@ -78,7 +78,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
             }
 
         if self.logprobs_tensors is not None:
-            self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
+            self.model_runner_output.logprobs = self.logprobs_tensors.tolists_cpu()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
         return self.model_runner_output
 

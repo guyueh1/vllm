@@ -1345,6 +1345,8 @@ class OpenAIServingChat(OpenAIServing):
         created_time = int(time.time())
         final_res: RequestOutput | None = None
 
+        logger.info("chat_completion_full_generator: enter")
+
         try:
             async for res in result_generator:
                 final_res = res
@@ -1358,7 +1360,8 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
         prompt_moe_topk_indices = (
-            final_res.prompt_moe_topk_indices.tolist()
+            # final_res.prompt_moe_topk_indices.tolist()
+            final_res.prompt_moe_topk_indices
             if final_res.prompt_moe_topk_indices is not None else None
         )
         prompt_moe_topk_indices_append_end = False

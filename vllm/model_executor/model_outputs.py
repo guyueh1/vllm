@@ -15,3 +15,5 @@ class ModelForwardOutput(NamedTuple):
     hidden_states: torch.Tensor | IntermediateTensors
     aux_hidden_states: list[torch.Tensor] | None
     moe_topk_indices: list[torch.Tensor] | None
+    moe_topk_indices_tensor: torch.Tensor | None
+    dummy_tensor: torch.Tensor | None

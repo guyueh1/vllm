@@ -29,9 +29,17 @@ from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_ep_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
@@ -78,6 +86,9 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronHConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class NemotronHMLP(nn.Module):
@@ -873,6 +884,8 @@ class NemotronHForCausalLM(
             self.num_shared_experts = example_moe.n_shared_experts
             self.num_redundant_experts = example_moe.n_redundant_experts
 
+        self.tp_rank = get_tensor_model_parallel_rank()
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -905,10 +918,31 @@ class NemotronHForCausalLM(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
 
+        # moe_topk_indices = None
+        if False and is_forward_context_available():
+            forward_context = get_forward_context()
+            moe_metadata = forward_context.moe_metadata
+            # moe_topk_indices = forward_context.moe_topk_indices
+            if moe_metadata is not None:
+                num_moe_layers = moe_metadata.num_moe_layers
+                topk = moe_metadata.topk
+            else:
+                num_moe_layers = None
+                topk = None
+            logger.info(f"NemotronH.forward: tp={self.tp_rank} moe nlayers = {num_moe_layers} topk = {topk}")
+            # if moe_topk_indices is not None:
+            #     logger.info(f"NemotronH.forward: tp={self.tp_rank} moe nlayers = {num_moe_layers} topk = {topk} indices len = {len(moe_topk_indices)}")
+            # else:
+            #     logger.info(f"NemotronH.forward: tp={self.tp_rank} moe nlayers = {num_moe_layers} topk = {topk} indices is None")
+
         return ModelForwardOutput(
             hidden_states=hidden_states,
             aux_hidden_states=None,
+            # NB: need to return None here, otherwise can stall cudagraph/compilation.
             moe_topk_indices=None,
+            # moe_topk_indices=moe_topk_indices,
+            moe_topk_indices_tensor=None,
+            dummy_tensor=None,
         )
 
     def compute_logits(
