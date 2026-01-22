@@ -198,6 +198,8 @@ class ModelConfig:
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
     """
+    enable_return_moe_topk_indices: bool = False
+    """Whether to return MoE top-K indices for routing replay (R3)."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the

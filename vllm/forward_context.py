@@ -184,6 +184,34 @@ class DPMetadata:
 
 
 @dataclass
+class MoEMetadata:
+    num_moe_layers: int | None = None
+    topk: int | None = None
+    enable_moe_topk_indices: bool | None = None
+
+    @staticmethod
+    def make(model, model_config) -> "MoEMetadata":
+        num_moe_layers = model.num_moe_layers
+        topks = []
+        for moe_layer_idx, layer in enumerate(model.moe_layers):
+            layer.moe_layer_idx = moe_layer_idx
+            topks.append(layer.top_k)
+        topk = None
+        if topks:
+            topk = topks[0]
+            for topk_ in topks[1:]:
+                if topk != topk_:
+                    logger.info(f"MoEMetadata: warning: non-matching MoE layer top-K: {topk} != {topk_}")
+                    topk = None
+                    break
+        return MoEMetadata(
+            num_moe_layers=num_moe_layers,
+            topk=topk,
+            enable_moe_topk_indices=model_config.enable_return_moe_topk_indices,
+        )
+
+
+@dataclass
 class MoETopkCapture:
     """Shared buffers for capturing per-layer MoE top-k ids inside a cudagraph."""
 
@@ -207,6 +235,7 @@ class ForwardContext:
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
+    moe_metadata: MoEMetadata | None = None
     dp_metadata: DPMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
     # by default NONE, no cudagraph is used.
@@ -246,6 +275,7 @@ def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
     virtual_engine: int = 0,
+    moe_metadata: MoEMetadata | None = None,
     dp_metadata: DPMetadata | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
@@ -256,6 +286,7 @@ def create_forward_context(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
+        moe_metadata=moe_metadata,
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
@@ -284,6 +315,7 @@ def set_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
     virtual_engine: int = 0,
+    moe_metadata: MoEMetadata | None = None,
     num_tokens: int | None = None,
     num_tokens_across_dp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -341,6 +373,7 @@ def set_forward_context(
         attn_metadata,
         vllm_config,
         virtual_engine,
+        moe_metadata,
         dp_metadata,
         cudagraph_runtime_mode,
         batch_descriptor,
