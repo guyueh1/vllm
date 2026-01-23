@@ -403,7 +403,8 @@ class RayDistributedExecutor(Executor):
 
         if not self.uses_sampler or not scheduler_output.total_num_scheduled_tokens:
             # Model will not execute, call model runner immediately.
-            return self._execute_dag(scheduler_output, None, non_block)
+            return self.collective_rpc("execute_model_ray", args=((scheduler_output, None,),))[0]
+            # return self._execute_dag(scheduler_output, None, non_block)
 
         # Model will execute, defer to sample_tokens() call.
         self.scheduler_output = scheduler_output
@@ -432,7 +433,8 @@ class RayDistributedExecutor(Executor):
 
         self.scheduler_output = None
 
-        return self._execute_dag(scheduler_output, grammar_output, non_block)
+        return self.collective_rpc("execute_model_ray", args=((scheduler_output, grammar_output,),))[0]
+        # return self._execute_dag(scheduler_output, grammar_output, non_block)
 
     def _execute_dag(
         self,

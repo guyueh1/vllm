@@ -347,10 +347,13 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        model_output_future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with self.log_error_detail(scheduler_output):
-            model_output = future.result()
+            if isinstance(model_output_future, ModelRunnerOutput):
+                model_output = model_output_future
+            else:
+                model_output = model_output_future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
