@@ -444,7 +444,7 @@ class EngineArgs:
     max_num_seqs: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
-    enable_return_moe_topk_indices: bool = ModelConfig.enable_return_moe_topk_indices
+    enable_moe_topk_indices: bool = ModelConfig.enable_moe_topk_indices
     disable_log_stats: bool = False
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
@@ -652,7 +652,7 @@ class EngineArgs:
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
         model_group.add_argument(
-            "--enable-return-moe-topk-indices", **model_kwargs["enable_return_moe_topk_indices"]
+            "--enable-moe-topk-indices", **model_kwargs["enable_moe_topk_indices"]
         )
         model_group.add_argument(
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
@@ -1224,7 +1224,7 @@ class EngineArgs:
             enforce_eager=self.enforce_eager,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
-            enable_return_moe_topk_indices=self.enable_return_moe_topk_indices,
+            enable_moe_topk_indices=self.enable_moe_topk_indices,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,

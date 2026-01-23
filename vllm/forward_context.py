@@ -207,7 +207,7 @@ class MoEMetadata:
         return MoEMetadata(
             num_moe_layers=num_moe_layers,
             topk=topk,
-            enable_moe_topk_indices=model_config.enable_return_moe_topk_indices,
+            enable_moe_topk_indices=model_config.enable_moe_topk_indices,
         )
 
 
