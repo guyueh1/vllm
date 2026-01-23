@@ -174,11 +174,7 @@ class ModelRunnerOutput:
     # [num_reqs]
     # Produced in the model runner (CPU lists) and sliced per-request in
     # the scheduler into EngineCoreOutput.new_logprobs.
-    logprobs: LogprobsLists | None = None
-
-    # Per-layer top-k MoE indices for the sampled tokens in this step.
-    # Sliced per-request in the scheduler into EngineCoreOutput.new_moe_topk_indices.
-    # moe_topk_indices: MoETopkLists | None = None
+    logprobs: LogprobsLists | None
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]
@@ -186,20 +182,10 @@ class ModelRunnerOutput:
     # [prompt_len]
     # Prompt logprobs stay as tensors until they are attached to
     # EngineCoreOutput.new_prompt_logprobs_tensors and processed in the engine.
-    prompt_logprobs_dict: dict[str, LogprobsTensors | None] = field(
-        default_factory=dict
-    )
-
-    # Per-request MoE top-k indices for prompt tokens, accumulated across
-    # chunked prefill steps.
-    # prompt_moe_topk_indices_dict: dict[str, list[torch.Tensor]] = field(
-    #     default_factory=dict
-    # )
+    prompt_logprobs_dict: dict[str, LogprobsTensors | None]
 
     # [num_reqs, hidden_size]
-    pooler_output: list[torch.Tensor | None] = field(
-        default_factory=list
-    )
+    pooler_output: list[torch.Tensor | None]
 
     kv_connector_output: KVConnectorOutput | None = None
 

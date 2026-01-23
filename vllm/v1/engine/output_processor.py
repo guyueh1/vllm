@@ -6,7 +6,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
-import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest

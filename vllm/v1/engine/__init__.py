@@ -122,12 +122,8 @@ class EngineCoreOutput(
 
     # Per-request logprobs sliced by the scheduler from ModelRunnerOutput.
     new_logprobs: LogprobsLists | None = None
-    # Per-request MoE top-k indices sliced by the scheduler.
-    # new_moe_topk_indices: MoETopkLists | None = None
     # Prompt logprobs tensors from prefill, forwarded to LogprobsProcessor.
     new_prompt_logprobs_tensors: LogprobsTensors | None = None
-    # Prompt MoE top-k indices accumulated during prefill.
-    # new_prompt_moe_topk_indices: list[torch.Tensor] | None = None
 
     pooling_output: torch.Tensor | None = None
 

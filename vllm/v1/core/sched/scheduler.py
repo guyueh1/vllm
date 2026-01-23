@@ -1064,11 +1064,7 @@ class Scheduler(SchedulerInterface):
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
-        # moe_topk_indices = model_runner_output.moe_topk_indices
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
-        # prompt_moe_topk_indices_dict = (
-        #     model_runner_output.prompt_moe_topk_indices_dict
-        # )
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
@@ -1146,7 +1142,6 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
-            # new_moe_topk_indices = None
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
@@ -1180,11 +1175,6 @@ class Scheduler(SchedulerInterface):
                 # Slice the batch logprobs from ModelRunnerOutput down to this
                 # request's newly generated positions for EngineCoreOutput.
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
-            # if moe_topk_indices and new_token_ids:
-            #     # Slice per-request MoE top-k indices for generated tokens.
-            #     new_moe_topk_indices = moe_topk_indices.slice_request(
-            #         req_index, len(new_token_ids)
-            #     )
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
                 struct_output_request = request.structured_output_request
@@ -1199,7 +1189,6 @@ class Scheduler(SchedulerInterface):
             # These are still tensors produced by the model runner during
             # prefill; the engine converts them into Python logprob dicts.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            # prompt_moe_topk_indices = prompt_moe_topk_indices_dict.get(req_id)
             if new_token_ids or pooler_output is not None or kv_transfer_params:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
@@ -1208,9 +1197,7 @@ class Scheduler(SchedulerInterface):
                         new_token_ids=new_token_ids,
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
-                        # new_moe_topk_indices=new_moe_topk_indices,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        # new_prompt_moe_topk_indices=prompt_moe_topk_indices,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
@@ -1223,7 +1210,6 @@ class Scheduler(SchedulerInterface):
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
-                # assert not prompt_moe_topk_indices
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
