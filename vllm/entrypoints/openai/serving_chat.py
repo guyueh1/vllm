@@ -1431,7 +1431,8 @@ class OpenAIServingChat(OpenAIServing):
                         content=content,
                     )
 
-                moe_topk_indices = output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
+                # moe_topk_indices = output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
+                moe_topk_indices = output.moe_topk_indices if output.moe_topk_indices is not None else None
                 if prompt_moe_topk_indices is not None and moe_topk_indices:
                     prompt_moe_topk_indices.append(
                         moe_topk_indices[0]
@@ -1601,7 +1602,8 @@ class OpenAIServingChat(OpenAIServing):
                 and output.finish_reason == "stop"
             )
 
-            moe_topk_indices = output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
+            # moe_topk_indices = output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
+            moe_topk_indices = output.moe_topk_indices if output.moe_topk_indices is not None else None
             if moe_topk_indices:
                 prompt_moe_topk_indices.append(
                     moe_topk_indices[0]

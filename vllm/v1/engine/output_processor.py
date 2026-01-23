@@ -356,16 +356,21 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
 
-        moe_topk_indices = None
-        if self.moe_topk_indices:
-            per_layer = self.moe_topk_indices
-            if delta:
-                if not token_ids:
-                    per_layer = []
-                else:
-                    per_layer = [layer[-len(token_ids) :] for layer in per_layer]
-            if per_layer:
-                moe_topk_indices = np.stack(per_layer, axis=1)
+        moe_topk_indices = self.logprobs_processor.sample_moe_topk_indices
+        if delta and moe_topk_indices:
+            moe_topk_indices = moe_topk_indices[-len(token_ids) :]
+
+        if False:
+            moe_topk_indices = None
+            if self.moe_topk_indices:
+                per_layer = self.moe_topk_indices
+                if delta:
+                    if not token_ids:
+                        per_layer = []
+                    else:
+                        per_layer = [layer[-len(token_ids) :] for layer in per_layer]
+                if per_layer:
+                    moe_topk_indices = np.stack(per_layer, axis=1)
 
         return CompletionOutput(
             index=self.request_index,
