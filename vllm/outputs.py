@@ -44,7 +44,7 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
-    moe_topk_indices: np.ndarray | None = None  # [seq_len, layer_num, top_k]
+    moe_topk_indices: list | None = None  # [seq_len, layer_num, top_k]
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
@@ -122,7 +122,7 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         *,
-        prompt_moe_topk_indices: np.ndarray | None = None,
+        prompt_moe_topk_indices: list | None = None,
         multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -153,8 +153,6 @@ class RequestOutput:
 
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
-        if next_output.prompt_moe_topk_indices is not None:
-            self.prompt_moe_topk_indices = next_output.prompt_moe_topk_indices
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
@@ -168,19 +166,9 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)
-                        if next_completion.moe_topk_indices is not None:
-                            if completion.moe_topk_indices is None:
-                                completion.moe_topk_indices = (
-                                    next_completion.moe_topk_indices
-                                )
-                            else:
-                                completion.moe_topk_indices = np.concatenate(
-                                    [
-                                        completion.moe_topk_indices,
-                                        next_completion.moe_topk_indices,
-                                    ],
-                                    axis=0,
-                                )
+                        if next_completion.moe_topk_indices:
+                            assert completion.moe_topk_indices is not None
+                            completion.moe_topk_indices.extend(next_completion.moe_topk_indices)
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )

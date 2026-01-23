@@ -1345,7 +1345,7 @@ class OpenAIServingChat(OpenAIServing):
         created_time = int(time.time())
         final_res: RequestOutput | None = None
 
-        logger.info("chat_completion_full_generator: enter")
+        # logger.info("chat_completion_full_generator: enter")
 
         try:
             async for res in result_generator:
@@ -1360,7 +1360,6 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
         prompt_moe_topk_indices = (
-            # final_res.prompt_moe_topk_indices.tolist()
             final_res.prompt_moe_topk_indices
             if final_res.prompt_moe_topk_indices is not None else None
         )
@@ -1382,8 +1381,6 @@ class OpenAIServingChat(OpenAIServing):
             out_logprobs = output.logprobs
             tool_call_info = None
 
-            # if output.prompt_moe_topk_indices is not None:
-            #     prompt_moe_topk_indices = output.prompt_moe_topk_indices.tolist()
             # logger.info(f"chat_completion_full_generator: output moe topk is None? {output.moe_topk_indices is None}")
 
             if request.logprobs and request.top_logprobs is not None:
@@ -1431,7 +1428,6 @@ class OpenAIServingChat(OpenAIServing):
                         content=content,
                     )
 
-                # moe_topk_indices = output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
                 moe_topk_indices = output.moe_topk_indices if output.moe_topk_indices is not None else None
                 if prompt_moe_topk_indices is not None and moe_topk_indices:
                     prompt_moe_topk_indices.append(
@@ -1602,7 +1598,6 @@ class OpenAIServingChat(OpenAIServing):
                 and output.finish_reason == "stop"
             )
 
-            # moe_topk_indices = output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
             moe_topk_indices = output.moe_topk_indices if output.moe_topk_indices is not None else None
             if moe_topk_indices:
                 prompt_moe_topk_indices.append(

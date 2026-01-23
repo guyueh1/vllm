@@ -14,7 +14,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors, MoETopkLists
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
 
 # These are possible values of RequestOutput.finish_reason,
@@ -123,11 +123,11 @@ class EngineCoreOutput(
     # Per-request logprobs sliced by the scheduler from ModelRunnerOutput.
     new_logprobs: LogprobsLists | None = None
     # Per-request MoE top-k indices sliced by the scheduler.
-    new_moe_topk_indices: MoETopkLists | None = None
+    # new_moe_topk_indices: MoETopkLists | None = None
     # Prompt logprobs tensors from prefill, forwarded to LogprobsProcessor.
     new_prompt_logprobs_tensors: LogprobsTensors | None = None
     # Prompt MoE top-k indices accumulated during prefill.
-    new_prompt_moe_topk_indices: list[torch.Tensor] | None = None
+    # new_prompt_moe_topk_indices: list[torch.Tensor] | None = None
 
     pooling_output: torch.Tensor | None = None
 

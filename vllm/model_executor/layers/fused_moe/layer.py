@@ -1769,11 +1769,6 @@ class FusedMoE(CustomOp):
                 # in eager execution and is skipped during torch.compile tracing
                 # and cudagraph replay.
                 ctx.moe_topk_indices.append(topk_ids.to(dtype=torch.int16))
-        if False:
-            if ctx.moe_topk_indices_tensor is not None:
-                ctx.moe_topk_indices_tensor[self.moe_layer_idx].copy_(
-                    topk_ids.to(dtype=torch.int16)
-                )
 
         return topk_weights, topk_ids
 
