@@ -350,7 +350,7 @@ class EngineCore:
         model_output_future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with self.log_error_detail(scheduler_output):
-            if isinstance(model_output_future, ModelRunnerOutput):
+            if model_output_future is None or isinstance(model_output_future, ModelRunnerOutput):
                 model_output = model_output_future
             else:
                 model_output = model_output_future.result()
