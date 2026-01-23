@@ -487,6 +487,7 @@ class EngineArgs:
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
 
+    disable_ray_cgraph: bool = ParallelConfig.disable_ray_cgraph
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
@@ -875,6 +876,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"],
+        )
+        parallel_group.add_argument(
+            "--disable-ray-cgraph", **parallel_kwargs["disable_ray_cgraph"]
         )
         parallel_group.add_argument(
             "--ray-workers-use-nsight", **parallel_kwargs["ray_workers_use_nsight"]
@@ -1588,6 +1592,7 @@ class EngineArgs:
             expert_placement_strategy=self.expert_placement_strategy,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
+            disable_ray_cgraph=self.disable_ray_cgraph,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             ray_runtime_env=ray_runtime_env,
             placement_group=placement_group,
