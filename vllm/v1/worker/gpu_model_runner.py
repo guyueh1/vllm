@@ -52,7 +52,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import (
     BatchDescriptor,
     MoEMetadata,
-    MoETopkCapture,
+    MoETopkIndicesCapture,
     get_forward_context,
     is_forward_context_available,
     set_forward_context,
@@ -2844,8 +2844,8 @@ class GPUModelRunner(
                 if buffers is not None:
                     # Store shared buffers so MoE layers can copy top-k ids
                     # into them during cudagraph capture/replay.
-                    forward_context.additional_kwargs["moe_topk_capture"] = (
-                        MoETopkCapture(
+                    forward_context.additional_kwargs["moe_topk_indices_capture"] = (
+                        MoETopkIndicesCapture(
                             buffers=buffers,
                             layer_id_to_index=self._moe_layer_id_to_index,
                             token_offset=0,
@@ -2868,11 +2868,11 @@ class GPUModelRunner(
             # that we reuse to build the per-layer list below.
             moe_topk_indices = forward_context.moe_topk_indices
             if not moe_topk_indices:
-                moe_topk_capture = forward_context.additional_kwargs.get(
-                    "moe_topk_capture"
+                moe_topk_indices_capture = forward_context.additional_kwargs.get(
+                    "moe_topk_indices_capture"
                 )
-                if moe_topk_capture is not None:
-                    moe_topk_indices = moe_topk_capture.buffers
+                if moe_topk_indices_capture is not None:
+                    moe_topk_indices = moe_topk_indices_capture.buffers
         if isinstance(output, ModelForwardOutput):
             assert output.moe_topk_indices is None
             return ModelForwardOutput(

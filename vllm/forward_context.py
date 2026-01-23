@@ -212,7 +212,7 @@ class MoEMetadata:
 
 
 @dataclass
-class MoETopkCapture:
+class MoETopkIndicesCapture:
     """Shared buffers for capturing per-layer MoE top-k ids inside a cudagraph."""
 
     buffers: list[torch.Tensor]

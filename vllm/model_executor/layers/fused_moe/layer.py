@@ -1751,14 +1751,14 @@ class FusedMoE(CustomOp):
 
         if is_forward_context_available():
             ctx = get_forward_context()
-            moe_topk_capture = ctx.additional_kwargs.get("moe_topk_capture")
-            if moe_topk_capture is not None:
-                moe_layer_idx = moe_topk_capture.layer_id_to_index.get(self.layer_id)
+            moe_topk_indices_capture = ctx.additional_kwargs.get("moe_topk_indices_capture")
+            if moe_topk_indices_capture is not None:
+                moe_layer_idx = moe_topk_indices_capture.layer_id_to_index.get(self.layer_id)
                 if moe_layer_idx is not None and moe_layer_idx < len(
-                    moe_topk_capture.buffers
+                    moe_topk_indices_capture.buffers
                 ):
-                    target = moe_topk_capture.buffers[moe_layer_idx]
-                    start = moe_topk_capture.token_offset
+                    target = moe_topk_indices_capture.buffers[moe_layer_idx]
+                    start = moe_topk_indices_capture.token_offset
                     end = min(start + topk_ids.shape[0], target.shape[0])
                     if end > start:
                         # In-place copy so cudagraph replay updates the buffer.

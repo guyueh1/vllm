@@ -15,7 +15,7 @@ from vllm.distributed import get_ep_group
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     DPMetadata,
-    MoETopkCapture,
+    MoETopkIndicesCapture,
     create_forward_context,
     get_forward_context,
     override_forward_context,
@@ -310,11 +310,11 @@ class UBatchWrapper:
         forward_contexts = []
         for i, ubatch_slice in enumerate(ubatch_slices):
             ubatch_kwargs = dict(additional_kwargs) if additional_kwargs else {}
-            moe_topk_capture = ubatch_kwargs.get("moe_topk_capture")
-            if moe_topk_capture is not None:
-                ubatch_kwargs["moe_topk_capture"] = MoETopkCapture(
-                    buffers=moe_topk_capture.buffers,
-                    layer_id_to_index=moe_topk_capture.layer_id_to_index,
+            moe_topk_indices_capture = ubatch_kwargs.get("moe_topk_indices_capture")
+            if moe_topk_indices_capture is not None:
+                ubatch_kwargs["moe_topk_indices_capture"] = MoETopkIndicesCapture(
+                    buffers=moe_topk_indices_capture.buffers,
+                    layer_id_to_index=moe_topk_indices_capture.layer_id_to_index,
                     token_offset=ubatch_slice.token_slice.start,
                 )
             forward_contexts.append(
