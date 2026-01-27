@@ -435,6 +435,7 @@ class RayDistributedExecutor(Executor):
         return self._execute_model(scheduler_output, grammar_output, non_block)
 
     def _execute_model(
+        self,
         scheduler_output: SchedulerOutput,
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,
