@@ -78,18 +78,18 @@ class LogprobsProcessor:
 
         assert self.moe_metadata is not None
         expert_bits = self.moe_metadata.calculate_expert_bits()
+        token_bits = expert_bits * self.moe_metadata.num_moe_layers * self.moe_metadata.topk
 
-        bitmask = np.zeros((bits_per_pos + 7) // 8, dtype=np.uint8)
+        token_bitmask = np.zeros((token_bits + 7) >> 3, dtype=np.uint8)
         bit_start = 0
         for exp_lst in topk_indices:
             for k in exp_lst:
                 byte_mid = (bit_start + 7) >> 3
-                bit_mid = byte_mid << 3
-                lo_bits = bit_mid - bit_start
-                bitmask[bit_start >> 3] |= (k << (bit_start & 7)) & 0xff
-                bitmask[byte_mid] |= (k >> lo_bits) & 0xff
+                bit_lo = (byte_mid << 3) - bit_start
+                token_bitmask[bit_start >> 3] |= (k << (bit_start & 7)) & 0xff
+                token_bitmask[byte_mid] |= (k >> bit_lo) & 0xff
                 bit_start += expert_bits
-        return base64.b64encode(bitmask.data)
+        return base64.b64encode(token_bitmask.data)
 
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
         """Update with sample logprobs from EngineCore.
