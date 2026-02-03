@@ -37,8 +37,8 @@ class LogprobsProcessor:
     num_logprobs: int | None
     num_prompt_logprobs: int | None
 
-    sample_moe_topk_indices: list | None = field(default_factory=list)
-    prompt_moe_topk_indices: list | None = field(default_factory=list)
+    sample_moe_topk_indices: list[str] | list[list[list[int]]] | None = field(default_factory=list)
+    prompt_moe_topk_indices: list[str] | list[list[list[int]]] | None = field(default_factory=list)
 
     @classmethod
     def from_new_request(
@@ -199,7 +199,9 @@ class LogprobsProcessor:
             self.prompt_logprobs = []
         return plp
 
-    def pop_prompt_moe_topk_indices(self):
+    def pop_prompt_moe_topk_indices(
+        self,
+    ) -> list[str] | list[list[list[int]]] | None:
         """Pop and return all request prompt logprobs
 
         The logprobs processor aggregates prompt chunk logprobs

@@ -44,7 +44,7 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
-    moe_topk_indices: list | None = None  # [seq_len, layer_num, top_k]
+    moe_topk_indices: list[str] | list[list[list[int]]] | None = None  # [seq_len, layer_num, top_k]
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
@@ -122,7 +122,7 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         *,
-        prompt_moe_topk_indices: list | None = None,
+        prompt_moe_topk_indices: list[str] | list[list[list[int]]] | None = None,
         multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can

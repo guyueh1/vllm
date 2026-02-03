@@ -1499,7 +1499,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # not part of the OpenAI spec but is useful for tracing the tokens
     # in agent scenarios
     token_ids: list[int] | None = None
-    moe_topk_indices: list[list[list[int]]] | None = None
+    moe_topk_indices: list[str] | list[list[list[int]]] | None = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -1515,7 +1515,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None
-    prompt_moe_topk_indices: list[list[list[int]]] | None = None
+    prompt_moe_topk_indices: list[str] | list[list[list[int]]] | None = None
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
