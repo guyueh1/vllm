@@ -1070,6 +1070,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        moe_metadata = model_runner_output.moe_metadata
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1205,6 +1206,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        moe_metadata=moe_metadata,
                     )
                 )
             else:
@@ -1230,6 +1232,7 @@ class Scheduler(SchedulerInterface):
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        moe_metadata=moe_metadata,
                     )
                 )
 

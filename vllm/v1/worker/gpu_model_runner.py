@@ -2475,6 +2475,7 @@ class GPUModelRunner(
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
+            moe_metadata=self.moe_metadata,
         )
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
@@ -3572,6 +3573,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                moe_metadata=self.moe_metadata,
             )
 
         if not self.use_async_scheduling:

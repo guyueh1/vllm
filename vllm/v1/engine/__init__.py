@@ -9,6 +9,7 @@ from typing import Any
 import msgspec
 import torch
 
+from vllm.forward_context import MoEMetadata
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -139,6 +140,8 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    moe_metadata: MoEMetadata | None = None
 
     @property
     def finished(self) -> bool:

@@ -4,6 +4,7 @@
 import itertools
 from dataclasses import dataclass, field
 
+from vllm.forward_context import MoEMetadata
 from vllm.logger import init_logger
 from vllm.logprobs import (
     PromptLogprobs,
@@ -39,6 +40,7 @@ class LogprobsProcessor:
 
     sample_moe_topk_indices: list[str] | list[list[list[int]]] | None = field(default_factory=list)
     prompt_moe_topk_indices: list[str] | list[list[list[int]]] | None = field(default_factory=list)
+    moe_metadata: MoEMetadata | None = None
 
     @classmethod
     def from_new_request(
@@ -228,6 +230,8 @@ class LogprobsProcessor:
         return plp
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
+        if self.moe_metadata is None and output.moe_metadata is not None:
+            self.moe_metadata = output.moe_metadata
         # EngineCoreOutput carries per-request logprob slices from the scheduler.
         # This conversion is identical across eager and compiled/cudagraph modes.
         if output.new_logprobs is not None:
