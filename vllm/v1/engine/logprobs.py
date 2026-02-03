@@ -67,6 +67,11 @@ class LogprobsProcessor:
             num_logprobs=num_logprobs,
         )
 
+    def _postproc_topk_indices(
+        self, topk_indices: list[list[int]]
+    ) -> list[list[int]] | str:
+        return topk_indices
+
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
         """Update with sample logprobs from EngineCore.
 
@@ -93,7 +98,9 @@ class LogprobsProcessor:
             rank = rank_np.tolist()
             logprobs = logprobs_np.tolist()
             token_ids = token_ids_np.tolist()
-            moe_topk_indices = moe_topk_indices_np.tolist()
+            moe_topk_indices = self._postproc_topk_indices(
+                moe_topk_indices_np.tolist()
+            )
             # Detokenize (non-incrementally).
             decoded_tokens = (
                 NONES
@@ -177,7 +184,7 @@ class LogprobsProcessor:
             )
 
             self.prompt_moe_topk_indices.append(
-                prompt_moe_topk_indices[pos]
+                self._postproc_topk_indices(prompt_moe_topk_indices[pos])
             )
 
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
