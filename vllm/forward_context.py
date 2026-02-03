@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 import time
 from collections import defaultdict
 from contextlib import contextmanager
@@ -186,12 +187,15 @@ class DPMetadata:
 @dataclass
 class MoEMetadata:
     num_moe_layers: int | None = None
+    num_experts: int | None = None
+    expert_bits: int | None = None
     topk: int | None = None
     enable_moe_topk_indices: bool | None = None
 
     @staticmethod
     def make(model, model_config) -> "MoEMetadata":
         num_moe_layers = model.num_moe_layers
+        num_experts = model.num_routed_experts
         topks = []
         for moe_layer_idx, layer in enumerate(model.moe_layers):
             layer.moe_layer_idx = moe_layer_idx
@@ -206,9 +210,16 @@ class MoEMetadata:
                     break
         return MoEMetadata(
             num_moe_layers=num_moe_layers,
+            num_experts=num_experts,
             topk=topk,
             enable_moe_topk_indices=model_config.enable_moe_topk_indices,
         )
+
+    def calculate_expert_bits(self) -> int:
+        if self.expert_bits is not None:
+            return self.expert_bits
+        self.expert_bits = int(math.ceil(math.log2(self.num_experts)))
+        return self.expert_bits
 
 
 @dataclass

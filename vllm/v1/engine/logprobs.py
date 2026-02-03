@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import base64
 import itertools
 from dataclasses import dataclass, field
 
@@ -70,9 +71,25 @@ class LogprobsProcessor:
         )
 
     def _postproc_topk_indices(
-        self, topk_indices: list[list[int]]
+        self, topk_indices: list[list[int]] | str
     ) -> list[list[int]] | str:
-        return topk_indices
+        if isinstance(topk_indices, bytes) or isinstance(topk_indices, str):
+            return topk_indices
+
+        assert self.moe_metadata is not None
+        expert_bits = self.moe_metadata.calculate_expert_bits()
+
+        bitmask = np.zeros((bits_per_pos + 7) // 8, dtype=np.uint8)
+        bit_start = 0
+        for exp_lst in topk_indices:
+            for k in exp_lst:
+                byte_mid = (bit_start + 7) >> 3
+                bit_mid = byte_mid << 3
+                lo_bits = bit_mid - bit_start
+                bitmask[bit_start >> 3] |= (k << (bit_start & 7)) & 0xff
+                bitmask[byte_mid] |= (k >> lo_bits) & 0xff
+                bit_start += expert_bits
+        return base64.b64encode(bitmask.data)
 
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
         """Update with sample logprobs from EngineCore.
