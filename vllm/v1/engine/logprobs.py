@@ -5,6 +5,8 @@ import base64
 import itertools
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from vllm.forward_context import MoEMetadata
 from vllm.logger import init_logger
 from vllm.logprobs import (
@@ -78,6 +80,8 @@ class LogprobsProcessor:
 
         assert self.moe_metadata is not None
         expert_bits = self.moe_metadata.calculate_expert_bits()
+        # TODO(pjin): for more experts, just expand the dtype.
+        assert expert_bits <= 9
         token_bits = expert_bits * self.moe_metadata.num_moe_layers * self.moe_metadata.topk
 
         token_bitmask = np.zeros((token_bits + 7) >> 3, dtype=np.uint8)
@@ -117,7 +121,8 @@ class LogprobsProcessor:
             rank = rank_np.tolist()
             logprobs = logprobs_np.tolist()
             token_ids = token_ids_np.tolist()
-            moe_topk_indices = self._postproc_topk_indices(
+            # moe_topk_indices = self._postproc_topk_indices(
+            moe_topk_indices = (
                 moe_topk_indices_np.tolist()
             )
             # Detokenize (non-incrementally).
@@ -203,7 +208,8 @@ class LogprobsProcessor:
             )
 
             self.prompt_moe_topk_indices.append(
-                self._postproc_topk_indices(prompt_moe_topk_indices[pos])
+                # self._postproc_topk_indices(prompt_moe_topk_indices[pos])
+                prompt_moe_topk_indices[pos]
             )
 
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
