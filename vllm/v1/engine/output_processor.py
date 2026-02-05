@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import torch
 
+from vllm.forward_context import MoEMetadata
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     CompletionOutput,
@@ -204,6 +205,8 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
+        *,
+        moe_metadata: MoEMetadata | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -253,7 +256,11 @@ class RequestState:
                 return None
 
         return self._new_request_output(
-            request_id, outputs, finished, kv_transfer_params
+            request_id,
+            outputs,
+            finished,
+            kv_transfer_params,
+            moe_metadata=moe_metadata,
         )
 
     def _new_request_output(
@@ -262,6 +269,8 @@ class RequestState:
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
+        *,
+        moe_metadata: MoEMetadata | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
@@ -289,6 +298,9 @@ class RequestState:
         if prompt_token_ids is None and self.prompt_embeds is not None:
             prompt_token_ids = [0] * len(self.prompt_embeds)
 
+        if moe_metadata is None and self.logprobs_processor is not None:
+            moe_metadata = self.logprobs_processor.moe_metadata
+
         return RequestOutput(
             request_id=request_id,
             lora_request=self.lora_request,
@@ -296,6 +308,7 @@ class RequestState:
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
             prompt_moe_topk_indices=prompt_moe_topk_indices,
+            moe_metadata=moe_metadata,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
@@ -522,6 +535,7 @@ class OutputProcessor:
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
+                moe_metadata=engine_core_output.moe_metadata,
             ):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().

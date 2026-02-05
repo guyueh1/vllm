@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from typing_extensions import TypeVar
 
+from vllm.forward_context import MoEMetadata
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
@@ -105,6 +106,7 @@ class RequestOutput:
         encoder_prompt_token_ids: The token IDs of the encoder prompt.
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
+        moe_metadata: Metadata describing MoE topology for this request.
         kv_transfer_params: The params for remote K/V transfer.
     """
 
@@ -123,6 +125,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         *,
         prompt_moe_topk_indices: list[str] | list[list[list[int]]] | None = None,
+        moe_metadata: MoEMetadata | None = None,
         multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -139,6 +142,7 @@ class RequestOutput:
         self.multi_modal_placeholders = multi_modal_placeholders or {}
         self.prompt_logprobs = prompt_logprobs
         self.prompt_moe_topk_indices = prompt_moe_topk_indices
+        self.moe_metadata = moe_metadata
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
@@ -153,6 +157,8 @@ class RequestOutput:
 
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
+        if self.moe_metadata is None and next_output.moe_metadata is not None:
+            self.moe_metadata = next_output.moe_metadata
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
@@ -190,6 +196,7 @@ class RequestOutput:
             f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
             f"prompt_moe_topk_indices={self.prompt_moe_topk_indices}, "
+            f"moe_metadata={self.moe_metadata}, "
             f"outputs={self.outputs}, "
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
