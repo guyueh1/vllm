@@ -41,8 +41,12 @@ class LogprobsProcessor:
     num_logprobs: int | None
     num_prompt_logprobs: int | None
 
-    sample_moe_topk_indices: list[str] | list[list[list[int]]] | None = field(default_factory=list)
-    prompt_moe_topk_indices: list[str] | list[list[list[int]]] | None = field(default_factory=list)
+    sample_moe_topk_indices: list[np.ndarray] | list[str] | list[list[list[int]]] | None = field(
+        default_factory=list
+    )
+    prompt_moe_topk_indices: list[np.ndarray] | list[str] | list[list[list[int]]] | None = field(
+        default_factory=list
+    )
     moe_metadata: MoEMetadata | None = None
 
     @classmethod
@@ -122,9 +126,7 @@ class LogprobsProcessor:
             logprobs = logprobs_np.tolist()
             token_ids = token_ids_np.tolist()
             # moe_topk_indices = self._postproc_topk_indices(
-            moe_topk_indices = (
-                moe_topk_indices_np.tolist()
-            )
+            moe_topk_indices = moe_topk_indices_np
             # Detokenize (non-incrementally).
             decoded_tokens = (
                 NONES
@@ -186,7 +188,7 @@ class LogprobsProcessor:
         prompt_token_ranks = ranks.tolist()
         prompt_logprobs = logprobs.tolist()
         token_ids = token_ids.tolist()
-        prompt_moe_topk_indices = moe_topk_indices.tolist()
+        prompt_moe_topk_indices = moe_topk_indices.cpu().numpy()
 
         # Make Logprob for each position.
         for pos in range(num_prompt_tokens):
