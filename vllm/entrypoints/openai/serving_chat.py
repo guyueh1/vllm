@@ -1411,7 +1411,7 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_moe_topk_indices_block_gids = ray.get(put_ref)
                 t0 = datetime.utcnow()
                 logger.info(f"chat_completion_full_generator: block cache: copy: t0 = {t0.isoformat()}")
-                for gid, pos in zip(prompt_moe_topk_indices_block_gids["prompt_moe_topk_seq_len"], range(prompt_moe_topk_seq_len)):
+                for gid, pos in zip(prompt_moe_topk_indices_block_gids["prompt_moe_topk_indices"], range(prompt_moe_topk_seq_len)):
                     self.block_cache_ref.copy_to_gid(gid, prompt_moe_topk_indices[pos])
                 t1 = datetime.utcnow()
                 logger.info(f"chat_completion_full_generator: block cache: copy: t1 = {t1.isoformat()}")

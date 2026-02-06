@@ -14,7 +14,7 @@ class BlockCachePage:
 
     def __post_init__(self):
         if self._mem_view is None:
-            self._mem_view = np.frombuffer(bytearray(self.mem), dtype=np.uint8)
+            self._mem_view = np.frombuffer(bytearray(self.mem.buffer), dtype=np.uint8)
 
 
 class BlockCacheRef:
@@ -28,8 +28,8 @@ class BlockCacheRef:
     def copy_to_gid(self, gid: int, data: np.ndarray):
         # NB: if a gid was returned from the disaggregated block cache instance,
         # then the corresponding page is guaranteed to already exist.
-        pid = gid // num_blocks_per_page
-        blk = gid % num_blocks_per_page
+        pid = gid // self.num_blocks_per_page
+        blk = gid % self.num_blocks_per_page
         while pid <= len(self.pages):
             tmp_pid = len(self.pages)
             mem = SharedMemory(
