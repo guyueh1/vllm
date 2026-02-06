@@ -6,10 +6,13 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from datetime import datetime
 from typing import Final
 
 import jinja2
+import numpy as np
 import partial_json_parser
+import ray
 import regex as re
 from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
@@ -62,6 +65,7 @@ from vllm.entrypoints.openai.serving_engine import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.extensions.block_cache import BlockCacheRef
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -164,6 +168,9 @@ class OpenAIServingChat(OpenAIServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
+
+        self.block_cache_instance = None
+        self.block_cache_ref = None
 
     async def warmup(self) -> None:
         """
@@ -1363,8 +1370,51 @@ class OpenAIServingChat(OpenAIServing):
             final_res.prompt_moe_topk_indices
             if final_res.prompt_moe_topk_indices is not None else None
         )
-        prompt_moe_topk_indices_append_end = False
+        prompt_moe_topk_indices_init_output = False
         # logger.info(f"chat_completion_full_generator: prompt moe topk is None? {final_res.prompt_moe_topk_indices is None}")
+
+        if prompt_moe_topk_indices is not None:
+            if self.block_cache_instance is None:
+                block_size = (
+                    final_res.moe_metadata.num_moe_layers *
+                    final_res.moe_metadata.topk *
+                    # TODO: assuming always int16 storage.
+                    2
+                )
+                node_ip = ray._private.services.get_node_ip_address()
+                try:
+                    block_cache_instance = ray.get_actor(f"nemo_rl.block_cache.node.{node_ip}")
+                    self.block_cache_instance = block_cache_instance
+                    page_max_size = ray.get(self.block_cache_instance.get_page_max_size.remote())
+                    assert block_size == ray.get(self.block_cache_instance.set_block_size.remote(block_size))
+                    logger.info(f"chat_completion_full_generator: block cache: ready: node = {node_ip} page max size = {page_max_size} block size = {block_size}")
+                    self.block_cache_ref = BlockCacheRef(page_max_size, block_size)
+                except ValueError:
+                    self.block_cache_instance = None
+                    self.block_cache_ref = None
+                    logger.info(f"chat_completion_full_generator: block cache: not ready: node = {node_ip}")
+            if self.block_cache_instance is not None:
+                prompt_moe_topk_seq_len = None
+                t0 = datetime.utcnow()
+                logger.info(f"chat_completion_full_generator: block cache: put:  t0 = {t0.isoformat()}")
+                if isinstance(prompt_moe_topk_indices, np.ndarray):
+                    prompt_moe_topk_seq_len = int(prompt_moe_topk_indices.shape[0])
+                elif isinstance(prompt_moe_topk_indices, list):
+                    prompt_moe_topk_seq_len = len(prompt_moe_topk_indices)
+                else:
+                    raise NotImplementedError
+                t0 = datetime.utcnow()
+                logger.info(f"chat_completion_full_generator: block cache: put:  t0 = {t0.isoformat()}")
+                put_ref = self.block_cache_instance.put.remote(request_id, {"prompt_moe_topk_indices": prompt_moe_topk_seq_len})
+                t1 = datetime.utcnow()
+                logger.info(f"chat_completion_full_generator: block cache: put:  t1 = {t1.isoformat()}")
+                prompt_moe_topk_indices_block_gids = ray.get(put_ref)
+                t0 = datetime.utcnow()
+                logger.info(f"chat_completion_full_generator: block cache: copy: t0 = {t0.isoformat()}")
+                for gid, pos in zip(prompt_moe_topk_indices_block_gids["prompt_moe_topk_seq_len"], range(prompt_moe_topk_seq_len)):
+                    self.block_cache_ref.copy_to_gid(gid, prompt_moe_topk_indices[pos])
+                t1 = datetime.utcnow()
+                logger.info(f"chat_completion_full_generator: block cache: copy: t1 = {t1.isoformat()}")
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
@@ -1430,12 +1480,16 @@ class OpenAIServingChat(OpenAIServing):
 
                 moe_topk_indices = output.moe_topk_indices if output.moe_topk_indices is not None else None
                 if prompt_moe_topk_indices is not None and moe_topk_indices:
+                    if not prompt_moe_topk_indices_init_output:
+                        prompt_moe_topk_indices_init_output = True
+                    else:
+                        raise RuntimeError(
+                            """multiple response outputs not supported with --enable-moe-topk-indices"""
+                        )
                     prompt_moe_topk_indices.append(
                         moe_topk_indices[0]
                     )
                     moe_topk_indices = moe_topk_indices[1:]
-                    if not prompt_moe_topk_indices_append_end:
-                        prompt_moe_topk_indices_append_end = True
 
                 choice_data = ChatCompletionResponseChoice(
                     index=output.index,
@@ -1452,7 +1506,7 @@ class OpenAIServingChat(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
-                    moe_topk_indices=moe_topk_indices,
+                    # moe_topk_indices=moe_topk_indices,
                 )
                 choices.append(choice_data)
                 continue
@@ -1600,12 +1654,16 @@ class OpenAIServingChat(OpenAIServing):
 
             moe_topk_indices = output.moe_topk_indices if output.moe_topk_indices is not None else None
             if moe_topk_indices:
+                if not prompt_moe_topk_indices_init_output:
+                    prompt_moe_topk_indices_init_output = True
+                else:
+                    raise RuntimeError(
+                        """multiple response outputs not supported with --enable-moe-topk-indices"""
+                    )
                 prompt_moe_topk_indices.append(
                     moe_topk_indices[0]
                 )
                 moe_topk_indices = moe_topk_indices[1:]
-                if not prompt_moe_topk_indices_append_end:
-                    prompt_moe_topk_indices_append_end = True
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
@@ -1620,7 +1678,7 @@ class OpenAIServingChat(OpenAIServing):
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
-                moe_topk_indices=moe_topk_indices,
+                # moe_topk_indices=moe_topk_indices,
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
@@ -1670,7 +1728,7 @@ class OpenAIServingChat(OpenAIServing):
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
-            prompt_moe_topk_indices=prompt_moe_topk_indices,
+            # prompt_moe_topk_indices=prompt_moe_topk_indices,
             kv_transfer_params=final_res.kv_transfer_params,
         )
 
