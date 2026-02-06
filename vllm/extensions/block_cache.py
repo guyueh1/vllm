@@ -14,10 +14,10 @@ class BlockCachePage:
 
     def __post_init__(self):
         if self._mem_view is None:
-            self._mem_view = np.frombuffer(bytearray(self.mem.buffer), dtype=np.uint8)
+            self._mem_view = np.frombuffer(bytearray(self.mem.buf), dtype=np.uint8)
 
 
-class BlockCacheRef:
+class BlockCacheProducerRef:
     def __init__(self, page_max_size: int, block_size: int):
         self.page_max_size: int = page_max_size
         self.block_size: int = block_size
@@ -30,6 +30,7 @@ class BlockCacheRef:
         # then the corresponding page is guaranteed to already exist.
         pid = gid // self.num_blocks_per_page
         blk = gid % self.num_blocks_per_page
+        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: gid = {gid} pid = {pid} blk = {blk}", flush=True)
         while pid <= len(self.pages):
             tmp_pid = len(self.pages)
             mem = SharedMemory(

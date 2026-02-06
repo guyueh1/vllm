@@ -65,7 +65,7 @@ from vllm.entrypoints.openai.serving_engine import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.extensions.block_cache import BlockCacheRef
+from vllm.extensions.block_cache import BlockCacheProducerRef
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -1388,7 +1388,7 @@ class OpenAIServingChat(OpenAIServing):
                     page_max_size = ray.get(self.block_cache_instance.get_page_max_size.remote())
                     assert block_size == ray.get(self.block_cache_instance.set_block_size.remote(block_size))
                     logger.info(f"chat_completion_full_generator: block cache: ready: node = {node_ip} page max size = {page_max_size} block size = {block_size}")
-                    self.block_cache_ref = BlockCacheRef(page_max_size, block_size)
+                    self.block_cache_ref = BlockCacheProducerRef(page_max_size, block_size)
                 except ValueError:
                     self.block_cache_instance = None
                     self.block_cache_ref = None
@@ -1409,9 +1409,11 @@ class OpenAIServingChat(OpenAIServing):
                 t1 = datetime.utcnow()
                 logger.info(f"chat_completion_full_generator: block cache: put:  t1 = {t1.isoformat()}")
                 prompt_moe_topk_indices_block_gids = ray.get(put_ref)
+                prompt_moe_topk_indices_block_gids = prompt_moe_topk_indices_block_gids["prompt_moe_topk_indices"]
+                logger.info(f"chat_completion_full_generator: block cache: gids: {prompt_moe_topk_indices_block_gids[0]} ... {prompt_moe_topk_indices_block_gids[-1]}")
                 t0 = datetime.utcnow()
                 logger.info(f"chat_completion_full_generator: block cache: copy: t0 = {t0.isoformat()}")
-                for gid, pos in zip(prompt_moe_topk_indices_block_gids["prompt_moe_topk_indices"], range(prompt_moe_topk_seq_len)):
+                for gid, pos in zip(prompt_moe_topk_indices_block_gids, range(prompt_moe_topk_seq_len)):
                     self.block_cache_ref.copy_to_gid(gid, prompt_moe_topk_indices[pos])
                 t1 = datetime.utcnow()
                 logger.info(f"chat_completion_full_generator: block cache: copy: t1 = {t1.isoformat()}")
