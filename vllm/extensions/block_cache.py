@@ -23,6 +23,10 @@ class BlockCacheProducerRef:
         self.block_size: int = block_size
         self.block_aligned_size: int = ((block_size + 64 - 1) // 64) * 64
         self.num_blocks_per_page: int = self.page_max_size // self.block_aligned_size
+        print(f"DEBUG: BlockCacheProducerRef: page max size       = {self.page_max_size}", flush=True)
+        print(f"DEBUG: BlockCacheProducerRef: block size          = {self.block_size}", flush=True)
+        print(f"DEBUG: BlockCacheProducerRef: block aligned size  = {self.block_aligned_size}", flush=True)
+        print(f"DEBUG: BlockCacheProducerRef: num blocks per page = {self.num_blocks_per_page}", flush=True)
         self.pages: list = []
 
     def copy_to_gid(self, gid: int, data: np.ndarray):
@@ -31,8 +35,9 @@ class BlockCacheProducerRef:
         pid = gid // self.num_blocks_per_page
         blk = gid % self.num_blocks_per_page
         print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: gid = {gid} pid = {pid} blk = {blk}", flush=True)
-        while pid <= len(self.pages):
+        while pid >= len(self.pages):
             tmp_pid = len(self.pages)
+            print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: deref pid = {tmp_pid}", flush=True)
             mem = SharedMemory(
                 name=f"nemo_rl.block_cache.page.{tmp_pid}",
                 size=self.page_max_size,
