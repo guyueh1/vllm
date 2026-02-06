@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
-# from typing import Optional
 import multiprocessing.resource_tracker
 
 import numpy as np
@@ -47,10 +46,23 @@ class BlockCacheProducerRef:
             multiprocessing.resource_tracker.register(mem._name, "shared_memory")
             page = BlockCachePage(pid=tmp_pid, mem=mem)
             self.pages.append(page)
+        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: pid = {pid} num pages = {len(self.pages)}", flush=True)
         page = self.pages[pid]
-        data = np.ascontiguousarray(data)
-        data_view = data.view(np.uint8)
+        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: data type = {type(data).__name__}", flush=True)
+        if isinstance(data, np.ndarray):
+            print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: data shape = {data.shape} dtype = {data.dtype}", flush=True)
+        # data = np.ascontiguousarray(data)
+        data_view = data.ravel().view(np.uint8)
+        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: view shape = {data_view.shape} dtype = {data_view.dtype}", flush=True)
         start = blk * self.block_aligned_size
-        end = start + len(data_view)
+        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: start = {start}", flush=True)
+        end = start + int(data_view.shape[0])
+        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: end = {end}", flush=True)
         assert end <= start + self.block_aligned_size
-        page._mem_view[start:end] = data_view[:]
+        assert end == start + self.block_size
+        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: copy...", flush=True)
+        try:
+            page._mem_view[start:end] = data_view[:]
+            print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: done", flush=True)
+        except Exception as e:
+            print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: except: {type(e).__name__} {e}", flush=True)

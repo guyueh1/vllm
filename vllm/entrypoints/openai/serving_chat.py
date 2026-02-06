@@ -1405,15 +1405,17 @@ class OpenAIServingChat(OpenAIServing):
                     raise NotImplementedError
                 t0 = datetime.utcnow()
                 logger.info(f"chat_completion_full_generator: block cache: put:  t0 = {t0.isoformat()}")
+                logger.info(f"chat_completion_full_generator: block cache: put:  seq len = {prompt_moe_topk_seq_len}")
                 put_ref = self.block_cache_instance.put.remote(request_id, {"prompt_moe_topk_indices": prompt_moe_topk_seq_len})
                 t1 = datetime.utcnow()
                 logger.info(f"chat_completion_full_generator: block cache: put:  t1 = {t1.isoformat()}")
                 prompt_moe_topk_indices_block_gids = ray.get(put_ref)
                 prompt_moe_topk_indices_block_gids = prompt_moe_topk_indices_block_gids["prompt_moe_topk_indices"]
-                logger.info(f"chat_completion_full_generator: block cache: gids: {prompt_moe_topk_indices_block_gids[0]} ... {prompt_moe_topk_indices_block_gids[-1]}")
+                logger.info(f"chat_completion_full_generator: block cache: gids: len = {len(prompt_moe_topk_indices_block_gids)} {prompt_moe_topk_indices_block_gids[0]} ... {prompt_moe_topk_indices_block_gids[-1]}")
                 t0 = datetime.utcnow()
                 logger.info(f"chat_completion_full_generator: block cache: copy: t0 = {t0.isoformat()}")
                 for gid, pos in zip(prompt_moe_topk_indices_block_gids, range(prompt_moe_topk_seq_len)):
+                    logger.info(f"chat_completion_full_generator: block cache: copy: gid = {gid} pos = {pos}")
                     self.block_cache_ref.copy_to_gid(gid, prompt_moe_topk_indices[pos])
                 t1 = datetime.utcnow()
                 logger.info(f"chat_completion_full_generator: block cache: copy: t1 = {t1.isoformat()}")
