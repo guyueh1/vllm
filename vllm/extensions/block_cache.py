@@ -33,10 +33,10 @@ class BlockCacheProducerRef:
         # then the corresponding page is guaranteed to already exist.
         pid = gid // self.num_blocks_per_page
         blk = gid % self.num_blocks_per_page
-        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: gid = {gid} pid = {pid} blk = {blk}", flush=True)
+        # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: gid = {gid} pid = {pid} blk = {blk}", flush=True)
         while pid >= len(self.pages):
             tmp_pid = len(self.pages)
-            print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: deref pid = {tmp_pid}", flush=True)
+            # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: deref pid = {tmp_pid}", flush=True)
             mem = SharedMemory(
                 name=f"nemo_rl.block_cache.page.{tmp_pid}",
                 size=self.page_max_size,
@@ -46,23 +46,24 @@ class BlockCacheProducerRef:
             multiprocessing.resource_tracker.register(mem._name, "shared_memory")
             page = BlockCachePage(pid=tmp_pid, mem=mem)
             self.pages.append(page)
-        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: pid = {pid} num pages = {len(self.pages)}", flush=True)
+        # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: pid = {pid} num pages = {len(self.pages)}", flush=True)
         page = self.pages[pid]
-        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: data type = {type(data).__name__}", flush=True)
+        # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: data type = {type(data).__name__}", flush=True)
         if isinstance(data, np.ndarray):
-            print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: data shape = {data.shape} dtype = {data.dtype}", flush=True)
-        # data = np.ascontiguousarray(data)
+            pass
+            # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: data shape = {data.shape} dtype = {data.dtype}", flush=True)
         data_view = data.ravel().view(np.uint8)
-        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: view shape = {data_view.shape} dtype = {data_view.dtype}", flush=True)
+        # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: view shape = {data_view.shape} dtype = {data_view.dtype}", flush=True)
         start = blk * self.block_aligned_size
-        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: start = {start}", flush=True)
+        # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: start = {start}", flush=True)
         end = start + int(data_view.shape[0])
-        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: end = {end}", flush=True)
+        # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: end = {end}", flush=True)
         assert end <= start + self.block_aligned_size
         assert end == start + self.block_size
-        print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: copy...", flush=True)
+        # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: copy...", flush=True)
         try:
             page._mem_view[start:end] = data_view[:]
-            print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: done", flush=True)
+            # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: done", flush=True)
         except Exception as e:
-            print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: except: {type(e).__name__} {e}", flush=True)
+            pass
+            # print(f"DEBUG: BlockCacheProducerRef.copy_to_gid: except: {type(e).__name__} {e}", flush=True)
