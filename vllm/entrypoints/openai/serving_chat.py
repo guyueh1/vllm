@@ -1375,85 +1375,7 @@ class OpenAIServingChat(OpenAIServing):
         # logger.info(f"chat_completion_full_generator: prompt moe topk is None? {final_res.prompt_moe_topk_indices is None}")
 
         prompt_moe_topk_indices_block_cache_key = None
-        if prompt_moe_topk_indices is not None:
-            if self.block_cache_instance is None:
-                block_size = (
-                    final_res.moe_metadata.num_moe_layers *
-                    final_res.moe_metadata.topk *
-                    # TODO: assuming always int16 storage.
-                    2
-                )
-                node_ip = ray._private.services.get_node_ip_address()
-                block_cache_instance_id = f"nemo_rl.block_cache.node.{node_ip}"
-                try:
-                    block_cache_instance = ray.get_actor(block_cache_instance_id)
-                    self.block_cache_instance_id = block_cache_instance_id
-                    self.block_cache_instance = block_cache_instance
-                    page_max_size = ray.get(self.block_cache_instance.get_page_max_size.remote())
-                    assert block_size == ray.get(self.block_cache_instance.set_block_size.remote(block_size))
-                    logger.info(f"chat_completion_full_generator: block cache: ready: node = {node_ip} page max size = {page_max_size} block size = {block_size}")
-                    self.block_cache_ref = BlockCacheProducerRef(page_max_size, block_size)
-                except ValueError:
-                    self.block_cache_instance_id = None
-                    self.block_cache_instance = None
-                    self.block_cache_ref = None
-                    logger.info(f"chat_completion_full_generator: block cache: not ready: node = {node_ip}")
-            if self.block_cache_instance is not None:
-                base_req_id = request_id
-                if base_req_id.startswith("chatcmpl-"):
-                    base_req_id = base_req_id[9:]
-                elif base_req_id.startswith("chatcmpl_"):
-                    base_req_id = base_req_id[9:]
-                logger.info(f"chat_completion_full_generator: block cache: base req id = {base_req_id}")
-                prompt_moe_topk_seq_len = None
-                # FIXME
-                block_shape = [40, 22]
-                block_dtype = "numpy.int16"
-                # block_shape = None
-                # block_dtype = None
-                if isinstance(prompt_moe_topk_indices, np.ndarray):
-                    prompt_moe_topk_seq_len = int(prompt_moe_topk_indices.shape[0])
-                    # block_shape = [int(d) for d in prompt_moe_topk_indices.shape[1:]]
-                    # block_dtype = f"{prompt_moe_topk_indices.dtype}"
-                elif isinstance(prompt_moe_topk_indices, list):
-                    prompt_moe_topk_seq_len = len(prompt_moe_topk_indices)
-                    if prompt_moe_topk_seq_len > 0:
-                        if isinstance(prompt_moe_topk_indices[0], np.ndarray):
-                            pass
-                            # block_shape = [int(d) for d in prompt_moe_topk_indices[0].shape]
-                            # block_dtype = f"{prompt_moe_topk_indices[0].dtype}"
-                        else:
-                            logger.info(f"chat_completion_full_generator: block cache: warning: prompt_moe_topk_indices[0] is NOT an numpy array")
-                            pass
-                else:
-                    raise NotImplementedError
-                logger.info(f"chat_completion_full_generator: block cache: seq len = {prompt_moe_topk_seq_len} block shape = {block_shape} dtype = {block_dtype}")
-                t0 = datetime.utcnow()
-                logger.info(f"chat_completion_full_generator: block cache: put:  t0 = {t0.isoformat()}")
-                logger.info(f"chat_completion_full_generator: block cache: put:  seq len = {prompt_moe_topk_seq_len}")
-                put_ref = self.block_cache_instance.put.remote(
-                    base_req_id,
-                    {"prompt_moe_topk_indices": prompt_moe_topk_seq_len},
-                    block_shape,
-                    block_dtype,
-                )
-                t1 = datetime.utcnow()
-                logger.info(f"chat_completion_full_generator: block cache: put:  t1 = {t1.isoformat()}")
-                prompt_moe_topk_indices_block_gids = ray.get(put_ref)
-                prompt_moe_topk_indices_block_gids = prompt_moe_topk_indices_block_gids["prompt_moe_topk_indices"]
-                logger.info(f"chat_completion_full_generator: block cache: gids: len = {len(prompt_moe_topk_indices_block_gids)} {prompt_moe_topk_indices_block_gids[0]} ... {prompt_moe_topk_indices_block_gids[-1]}")
-                t0 = datetime.utcnow()
-                logger.info(f"chat_completion_full_generator: block cache: copy: t0 = {t0.isoformat()}")
-                for gid, pos in zip(prompt_moe_topk_indices_block_gids, range(prompt_moe_topk_seq_len)):
-                    # logger.info(f"chat_completion_full_generator: block cache: copy: gid = {gid} pos = {pos}")
-                    self.block_cache_ref.copy_to_gid(gid, prompt_moe_topk_indices[pos])
-                t1 = datetime.utcnow()
-                logger.info(f"chat_completion_full_generator: block cache: copy: t1 = {t1.isoformat()}")
-                prompt_moe_topk_indices_block_cache_key = {
-                    "instance_id": self.block_cache_instance_id,
-                    "req_id": base_req_id,
-                }
-                logger.info(f"chat_completion_full_generator: block cache: key = {prompt_moe_topk_indices_block_cache_key}")
+        moe_topk_indices_for_cache = None
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
@@ -1529,6 +1451,8 @@ class OpenAIServingChat(OpenAIServing):
                         moe_topk_indices[0]
                     )
                     moe_topk_indices = moe_topk_indices[1:]
+                if moe_topk_indices:
+                    moe_topk_indices_for_cache = moe_topk_indices
 
                 choice_data = ChatCompletionResponseChoice(
                     index=output.index,
@@ -1703,6 +1627,8 @@ class OpenAIServingChat(OpenAIServing):
                     moe_topk_indices[0]
                 )
                 moe_topk_indices = moe_topk_indices[1:]
+            if moe_topk_indices:
+                moe_topk_indices_for_cache = moe_topk_indices
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
@@ -1737,6 +1663,121 @@ class OpenAIServingChat(OpenAIServing):
             for choice in choices:
                 full_message = last_msg_content + (choice.message.content or "")
                 choice.message.content = full_message
+
+        if prompt_moe_topk_indices is not None:
+            if self.block_cache_instance is None:
+                block_size = (
+                    final_res.moe_metadata.num_moe_layers *
+                    final_res.moe_metadata.topk *
+                    # TODO: assuming always int16 storage.
+                    2
+                )
+                node_ip = ray._private.services.get_node_ip_address()
+                block_cache_instance_id = f"nemo_rl.block_cache.node.{node_ip}"
+                try:
+                    block_cache_instance = ray.get_actor(block_cache_instance_id)
+                    self.block_cache_instance_id = block_cache_instance_id
+                    self.block_cache_instance = block_cache_instance
+                    page_max_size = ray.get(self.block_cache_instance.get_page_max_size.remote())
+                    assert block_size == ray.get(self.block_cache_instance.set_block_size.remote(block_size))
+                    logger.info(f"chat_completion_full_generator: block cache: ready: node = {node_ip} page max size = {page_max_size} block size = {block_size}")
+                    self.block_cache_ref = BlockCacheProducerRef(page_max_size, block_size)
+                except ValueError:
+                    self.block_cache_instance_id = None
+                    self.block_cache_instance = None
+                    self.block_cache_ref = None
+                    logger.info(f"chat_completion_full_generator: block cache: not ready: node = {node_ip}")
+            if self.block_cache_instance is not None:
+                base_req_id = request_id
+                if base_req_id.startswith("chatcmpl-"):
+                    base_req_id = base_req_id[9:]
+                elif base_req_id.startswith("chatcmpl_"):
+                    base_req_id = base_req_id[9:]
+                logger.info(f"chat_completion_full_generator: block cache: base req id = {base_req_id}")
+                prompt_moe_topk_seq_len = None
+                moe_topk_seq_len = None
+                # FIXME
+                block_shape = [40, 22]
+                block_dtype = "numpy.int16"
+                # block_shape = None
+                # block_dtype = None
+                if isinstance(prompt_moe_topk_indices, np.ndarray):
+                    prompt_moe_topk_seq_len = int(prompt_moe_topk_indices.shape[0])
+                    # block_shape = [int(d) for d in prompt_moe_topk_indices.shape[1:]]
+                    # block_dtype = f"{prompt_moe_topk_indices.dtype}"
+                elif isinstance(prompt_moe_topk_indices, list):
+                    prompt_moe_topk_seq_len = len(prompt_moe_topk_indices)
+                    if prompt_moe_topk_seq_len > 0:
+                        if isinstance(prompt_moe_topk_indices[0], np.ndarray):
+                            pass
+                            # block_shape = [int(d) for d in prompt_moe_topk_indices[0].shape]
+                            # block_dtype = f"{prompt_moe_topk_indices[0].dtype}"
+                        else:
+                            logger.info(f"chat_completion_full_generator: block cache: warning: prompt_moe_topk_indices[0] is NOT an numpy array")
+                            pass
+                else:
+                    raise NotImplementedError
+                if moe_topk_indices_for_cache is not None:
+                    if isinstance(moe_topk_indices_for_cache, np.ndarray):
+                        moe_topk_seq_len = int(moe_topk_indices_for_cache.shape[0])
+                        # block_shape = [int(d) for d in moe_topk_indices_for_cache.shape[1:]]
+                        # block_dtype = f"{moe_topk_indices_for_cache.dtype}"
+                    elif isinstance(moe_topk_indices_for_cache, list):
+                        moe_topk_seq_len = len(moe_topk_indices_for_cache)
+                        if moe_topk_seq_len > 0:
+                            if isinstance(moe_topk_indices_for_cache[0], np.ndarray):
+                                pass
+                                # block_shape = [int(d) for d in moe_topk_indices_for_cache[0].shape]
+                                # block_dtype = f"{moe_topk_indices_for_cache[0].dtype}"
+                            else:
+                                logger.info(f"chat_completion_full_generator: block cache: warning: moe_topk_indices[0] is NOT an numpy array")
+                                pass
+                    else:
+                        raise NotImplementedError
+                logger.info(f"chat_completion_full_generator: block cache: seq len = {prompt_moe_topk_seq_len} block shape = {block_shape} dtype = {block_dtype}")
+                if moe_topk_seq_len is not None:
+                    logger.info(f"chat_completion_full_generator: block cache: seq len = {moe_topk_seq_len} block shape = {block_shape} dtype = {block_dtype}")
+                t0 = datetime.utcnow()
+                logger.info(f"chat_completion_full_generator: block cache: put:  t0 = {t0.isoformat()}")
+                logger.info(f"chat_completion_full_generator: block cache: put:  seq len = {prompt_moe_topk_seq_len}")
+                if moe_topk_seq_len is not None:
+                    logger.info(f"chat_completion_full_generator: block cache: put:  seq len = {moe_topk_seq_len}")
+                block_cache_items = {"prompt_moe_topk_indices": prompt_moe_topk_seq_len}
+                if moe_topk_seq_len is not None:
+                    block_cache_items["moe_topk_indices"] = moe_topk_seq_len
+                put_ref = self.block_cache_instance.put.remote(
+                    base_req_id,
+                    block_cache_items,
+                    block_shape,
+                    block_dtype,
+                )
+                t1 = datetime.utcnow()
+                logger.info(f"chat_completion_full_generator: block cache: put:  t1 = {t1.isoformat()}")
+                block_gids = ray.get(put_ref)
+                prompt_moe_topk_indices_block_gids = block_gids["prompt_moe_topk_indices"]
+                logger.info(f"chat_completion_full_generator: block cache: gids: len = {len(prompt_moe_topk_indices_block_gids)} {prompt_moe_topk_indices_block_gids[0]} ... {prompt_moe_topk_indices_block_gids[-1]}")
+                t0 = datetime.utcnow()
+                logger.info(f"chat_completion_full_generator: block cache: copy: t0 = {t0.isoformat()}")
+                for gid, pos in zip(prompt_moe_topk_indices_block_gids, range(prompt_moe_topk_seq_len)):
+                    # logger.info(f"chat_completion_full_generator: block cache: copy: gid = {gid} pos = {pos}")
+                    self.block_cache_ref.copy_to_gid(gid, prompt_moe_topk_indices[pos])
+                t1 = datetime.utcnow()
+                logger.info(f"chat_completion_full_generator: block cache: copy: t1 = {t1.isoformat()}")
+                if moe_topk_seq_len is not None:
+                    moe_topk_indices_block_gids = block_gids["moe_topk_indices"]
+                    logger.info(f"chat_completion_full_generator: block cache: gids: len = {len(moe_topk_indices_block_gids)} {moe_topk_indices_block_gids[0]} ... {moe_topk_indices_block_gids[-1]}")
+                    t0 = datetime.utcnow()
+                    logger.info(f"chat_completion_full_generator: block cache: copy: t0 = {t0.isoformat()}")
+                    for gid, pos in zip(moe_topk_indices_block_gids, range(moe_topk_seq_len)):
+                        # logger.info(f"chat_completion_full_generator: block cache: copy: gid = {gid} pos = {pos}")
+                        self.block_cache_ref.copy_to_gid(gid, moe_topk_indices_for_cache[pos])
+                    t1 = datetime.utcnow()
+                    logger.info(f"chat_completion_full_generator: block cache: copy: t1 = {t1.isoformat()}")
+                prompt_moe_topk_indices_block_cache_key = {
+                    "instance_id": self.block_cache_instance_id,
+                    "req_id": base_req_id,
+                }
+                logger.info(f"chat_completion_full_generator: block cache: key = {prompt_moe_topk_indices_block_cache_key}")
 
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
