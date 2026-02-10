@@ -1364,6 +1364,12 @@ class OpenAIServingChat(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
+        base_req_id = request_id
+        if base_req_id.startswith("chatcmpl-"):
+            base_req_id = base_req_id[9:]
+        elif base_req_id.startswith("chatcmpl_"):
+            base_req_id = base_req_id[9:]
+
         assert final_res is not None
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
@@ -1376,6 +1382,35 @@ class OpenAIServingChat(OpenAIServing):
 
         prompt_moe_topk_indices_block_cache_key = None
         moe_topk_indices_for_cache = None
+
+        if self.block_cache_instance is None:
+            block_size = (
+                final_res.moe_metadata.num_moe_layers *
+                final_res.moe_metadata.topk *
+                # TODO: assuming always int16 storage.
+                2
+            )
+            node_ip = ray._private.services.get_node_ip_address()
+            block_cache_instance_id = f"nemo_rl.block_cache.node.{node_ip}"
+            try:
+                block_cache_instance = ray.get_actor(block_cache_instance_id)
+                self.block_cache_instance_id = block_cache_instance_id
+                self.block_cache_instance = block_cache_instance
+                page_max_size = ray.get(self.block_cache_instance.get_page_max_size.remote())
+                assert block_size == ray.get(self.block_cache_instance.set_block_size.remote(block_size))
+                logger.info(f"chat_completion_full_generator: block cache: ready: node = {node_ip} page max size = {page_max_size} block size = {block_size}")
+                self.block_cache_ref = BlockCacheProducerRef(page_max_size, block_size)
+            except ValueError:
+                self.block_cache_instance_id = None
+                self.block_cache_instance = None
+                self.block_cache_ref = None
+                logger.info(f"chat_completion_full_generator: block cache: not ready: node = {node_ip}")
+
+        if self.block_cache_instance is not None:
+            prompt_moe_topk_indices_block_cache_key = {
+                "instance_id": self.block_cache_instance_id,
+                "req_id": base_req_id,
+            }
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
@@ -1469,7 +1504,7 @@ class OpenAIServingChat(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
-                    # moe_topk_indices=moe_topk_indices,
+                    moe_topk_indices=prompt_moe_topk_indices_block_cache_key,
                 )
                 choices.append(choice_data)
                 continue
@@ -1643,7 +1678,7 @@ class OpenAIServingChat(OpenAIServing):
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
-                # moe_topk_indices=moe_topk_indices,
+                moe_topk_indices=prompt_moe_topk_indices_block_cache_key,
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
@@ -1665,34 +1700,7 @@ class OpenAIServingChat(OpenAIServing):
                 choice.message.content = full_message
 
         if prompt_moe_topk_indices is not None:
-            if self.block_cache_instance is None:
-                block_size = (
-                    final_res.moe_metadata.num_moe_layers *
-                    final_res.moe_metadata.topk *
-                    # TODO: assuming always int16 storage.
-                    2
-                )
-                node_ip = ray._private.services.get_node_ip_address()
-                block_cache_instance_id = f"nemo_rl.block_cache.node.{node_ip}"
-                try:
-                    block_cache_instance = ray.get_actor(block_cache_instance_id)
-                    self.block_cache_instance_id = block_cache_instance_id
-                    self.block_cache_instance = block_cache_instance
-                    page_max_size = ray.get(self.block_cache_instance.get_page_max_size.remote())
-                    assert block_size == ray.get(self.block_cache_instance.set_block_size.remote(block_size))
-                    logger.info(f"chat_completion_full_generator: block cache: ready: node = {node_ip} page max size = {page_max_size} block size = {block_size}")
-                    self.block_cache_ref = BlockCacheProducerRef(page_max_size, block_size)
-                except ValueError:
-                    self.block_cache_instance_id = None
-                    self.block_cache_instance = None
-                    self.block_cache_ref = None
-                    logger.info(f"chat_completion_full_generator: block cache: not ready: node = {node_ip}")
             if self.block_cache_instance is not None:
-                base_req_id = request_id
-                if base_req_id.startswith("chatcmpl-"):
-                    base_req_id = base_req_id[9:]
-                elif base_req_id.startswith("chatcmpl_"):
-                    base_req_id = base_req_id[9:]
                 logger.info(f"chat_completion_full_generator: block cache: base req id = {base_req_id}")
                 prompt_moe_topk_seq_len = None
                 moe_topk_seq_len = None
@@ -1742,7 +1750,9 @@ class OpenAIServingChat(OpenAIServing):
                 logger.info(f"chat_completion_full_generator: block cache: put:  seq len = {prompt_moe_topk_seq_len}")
                 if moe_topk_seq_len is not None:
                     logger.info(f"chat_completion_full_generator: block cache: put:  seq len = {moe_topk_seq_len}")
-                block_cache_items = {"prompt_moe_topk_indices": prompt_moe_topk_seq_len}
+                block_cache_items = {}
+                if prompt_moe_topk_seq_len is not None:
+                    block_cache_items["prompt_moe_topk_indices"] = prompt_moe_topk_seq_len
                 if moe_topk_seq_len is not None:
                     block_cache_items["moe_topk_indices"] = moe_topk_seq_len
                 put_ref = self.block_cache_instance.put.remote(
