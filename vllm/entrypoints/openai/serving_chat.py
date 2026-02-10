@@ -1504,7 +1504,9 @@ class OpenAIServingChat(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
-                    moe_topk_indices=prompt_moe_topk_indices_block_cache_key,
+                    moe_topk_indices={
+                        "block_cache_key": prompt_moe_topk_indices_block_cache_key,
+                    },
                 )
                 choices.append(choice_data)
                 continue
@@ -1678,7 +1680,9 @@ class OpenAIServingChat(OpenAIServing):
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
-                moe_topk_indices=prompt_moe_topk_indices_block_cache_key,
+                moe_topk_indices={
+                    "block_cache_key": prompt_moe_topk_indices_block_cache_key,
+                },
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
@@ -1783,10 +1787,6 @@ class OpenAIServingChat(OpenAIServing):
                         self.block_cache_ref.copy_to_gid(gid, moe_topk_indices_for_cache[pos])
                     t1 = datetime.utcnow()
                     logger.info(f"chat_completion_full_generator: block cache: copy: t1 = {t1.isoformat()}")
-                prompt_moe_topk_indices_block_cache_key = {
-                    "instance_id": self.block_cache_instance_id,
-                    "req_id": base_req_id,
-                }
                 logger.info(f"chat_completion_full_generator: block cache: key = {prompt_moe_topk_indices_block_cache_key}")
 
         assert final_res.prompt_token_ids is not None
