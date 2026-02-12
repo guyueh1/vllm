@@ -1383,7 +1383,10 @@ class OpenAIServingChat(OpenAIServing):
         prompt_moe_topk_indices_block_cache_key = None
         moe_topk_indices_for_cache = None
 
-        if self.block_cache_instance is None:
+        if (
+            self.model_config.enable_moe_topk_indices_nemo_rl_block_cache and
+            self.block_cache_instance is None
+        ):
             block_size = (
                 final_res.moe_metadata.num_moe_layers *
                 final_res.moe_metadata.topk *
@@ -1708,7 +1711,7 @@ class OpenAIServingChat(OpenAIServing):
                 logger.info(f"chat_completion_full_generator: block cache: base req id = {base_req_id}")
                 prompt_moe_topk_seq_len = None
                 moe_topk_seq_len = None
-                # FIXME
+                # FIXME: hardcoded for super v3...
                 block_shape = [40, 22]
                 block_dtype = "numpy.int16"
                 # block_shape = None
