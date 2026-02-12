@@ -1372,11 +1372,9 @@ class OpenAIServingChat(OpenAIServing):
             base_req_id = base_req_id[9:]
 
         assert final_res is not None
-        moe_metadata = final_res.moe_metadata
-        if moe_metadata is not None and not isinstance(moe_metadata, dict):
-            moe_metadata = asdict(moe_metadata)
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
+
         prompt_moe_topk_indices = (
             final_res.prompt_moe_topk_indices
             if final_res.prompt_moe_topk_indices is not None else None
@@ -1386,7 +1384,10 @@ class OpenAIServingChat(OpenAIServing):
 
         moe_topk_indices_block_cache_key = None
         moe_topk_indices_for_cache = None
+
         moe_metadata = final_res.moe_metadata
+        if moe_metadata is not None and not isinstance(moe_metadata, dict):
+            moe_metadata = asdict(moe_metadata)
 
         if (
             self.model_config.enable_moe_topk_indices_nemo_rl_block_cache and
@@ -1717,14 +1718,10 @@ class OpenAIServingChat(OpenAIServing):
                 logger.info(f"chat_completion_full_generator: block cache: base req id = {base_req_id}")
                 prompt_moe_topk_seq_len = None
                 moe_topk_seq_len = None
-                if moe_metadata is None:
-                    # FIXME: hardcoded for super v3...
-                    block_shape = [40, 22]
-                else:
-                    block_shape = [
-                        moe_metadata.num_moe_layers,
-                        moe_metadata.topk,
-                    ]
+                block_shape = [
+                    moe_metadata.num_moe_layers,
+                    moe_metadata.topk,
+                ]
                 block_dtype = "numpy.int16"
                 # block_shape = None
                 # block_dtype = None
