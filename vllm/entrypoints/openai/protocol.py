@@ -1516,6 +1516,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None
     prompt_moe_topk_indices: dict[str, Any] | list[str] | list[list[list[int]]] | None = None
+    moe_metadata: dict[str, Any] | None = None
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )

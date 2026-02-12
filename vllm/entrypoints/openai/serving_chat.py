@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from dataclasses import asdict
 from datetime import datetime
 from typing import Final
 
@@ -1371,6 +1372,9 @@ class OpenAIServingChat(OpenAIServing):
             base_req_id = base_req_id[9:]
 
         assert final_res is not None
+        moe_metadata = final_res.moe_metadata
+        if moe_metadata is not None and not isinstance(moe_metadata, dict):
+            moe_metadata = asdict(moe_metadata)
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
         prompt_moe_topk_indices = (
@@ -1380,7 +1384,7 @@ class OpenAIServingChat(OpenAIServing):
         prompt_moe_topk_indices_init_output = False
         # logger.info(f"chat_completion_full_generator: prompt moe topk is None? {final_res.prompt_moe_topk_indices is None}")
 
-        prompt_moe_topk_indices_block_cache_key = None
+        moe_topk_indices_block_cache_key = None
         moe_topk_indices_for_cache = None
 
         if self.block_cache_instance is None:
@@ -1407,7 +1411,7 @@ class OpenAIServingChat(OpenAIServing):
                 logger.info(f"chat_completion_full_generator: block cache: not ready: node = {node_ip}")
 
         if self.block_cache_instance is not None:
-            prompt_moe_topk_indices_block_cache_key = {
+            moe_topk_indices_block_cache_key = {
                 "instance_id": self.block_cache_instance_id,
                 "req_id": base_req_id,
             }
@@ -1505,7 +1509,7 @@ class OpenAIServingChat(OpenAIServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     moe_topk_indices={
-                        "block_cache_key": prompt_moe_topk_indices_block_cache_key,
+                        "block_cache_key": moe_topk_indices_block_cache_key,
                     },
                 )
                 choices.append(choice_data)
@@ -1681,7 +1685,7 @@ class OpenAIServingChat(OpenAIServing):
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
                 moe_topk_indices={
-                    "block_cache_key": prompt_moe_topk_indices_block_cache_key,
+                    "block_cache_key": moe_topk_indices_block_cache_key,
                 },
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
@@ -1787,7 +1791,7 @@ class OpenAIServingChat(OpenAIServing):
                         self.block_cache_ref.copy_to_gid(gid, moe_topk_indices_for_cache[pos])
                     t1 = datetime.utcnow()
                     logger.info(f"chat_completion_full_generator: block cache: copy: t1 = {t1.isoformat()}")
-                logger.info(f"chat_completion_full_generator: block cache: key = {prompt_moe_topk_indices_block_cache_key}")
+                logger.info(f"chat_completion_full_generator: block cache: key = {moe_topk_indices_block_cache_key}")
 
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
@@ -1809,10 +1813,10 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata.final_usage_info = usage
 
         prompt_moe_topk_indices_response_item = None
-        if prompt_moe_topk_indices_block_cache_key is not None:
+        if moe_topk_indices_block_cache_key is not None:
             logger.info(f"chat_completion_full_generator: block cache: response item: set cache key...")
             prompt_moe_topk_indices_response_item = {
-                "block_cache_key": prompt_moe_topk_indices_block_cache_key,
+                "block_cache_key": moe_topk_indices_block_cache_key,
             }
             logger.info(f"chat_completion_full_generator: block cache: response item = {prompt_moe_topk_indices_response_item}")
 
@@ -1828,6 +1832,7 @@ class OpenAIServingChat(OpenAIServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             prompt_moe_topk_indices=prompt_moe_topk_indices_response_item,
+            moe_metadata=moe_metadata,
             kv_transfer_params=final_res.kv_transfer_params,
         )
         logger.info(f"chat_completion_full_generator: build response: done")
