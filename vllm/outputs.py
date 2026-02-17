@@ -6,9 +6,11 @@ from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
 from typing import Any, Generic
 
+import numpy as np
 import torch
 from typing_extensions import TypeVar
 
+from vllm.forward_context import MoEMetadata
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
@@ -43,6 +45,9 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
+    moe_topk_indices: (
+        list[np.ndarray] | list[str] | list[list[list[int]]] | None
+    ) = None  # [seq_len, layer_num, top_k]
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
@@ -57,6 +62,7 @@ class CompletionOutput:
             f"token_ids={self.token_ids}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
+            f"moe_topk_indices={self.moe_topk_indices}, "
             f"finish_reason={self.finish_reason}, "
             f"stop_reason={self.stop_reason})"
         )
@@ -102,6 +108,7 @@ class RequestOutput:
         encoder_prompt_token_ids: The token IDs of the encoder prompt.
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
+        moe_metadata: Metadata describing MoE topology for this request.
         kv_transfer_params: The params for remote K/V transfer.
     """
 
@@ -119,6 +126,10 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         *,
+        prompt_moe_topk_indices: (
+            list[np.ndarray] | list[str] | list[list[list[int]]] | None
+        ) = None,
+        moe_metadata: MoEMetadata | None = None,
         multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -134,6 +145,8 @@ class RequestOutput:
         self.prompt_token_ids = prompt_token_ids
         self.multi_modal_placeholders = multi_modal_placeholders or {}
         self.prompt_logprobs = prompt_logprobs
+        self.prompt_moe_topk_indices = prompt_moe_topk_indices
+        self.moe_metadata = moe_metadata
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
@@ -148,6 +161,8 @@ class RequestOutput:
 
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
+        if self.moe_metadata is None and next_output.moe_metadata is not None:
+            self.moe_metadata = next_output.moe_metadata
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
@@ -161,6 +176,9 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)
+                        if next_completion.moe_topk_indices:
+                            assert completion.moe_topk_indices is not None
+                            completion.moe_topk_indices.extend(next_completion.moe_topk_indices)
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
@@ -181,6 +199,8 @@ class RequestOutput:
             f"encoder_prompt={self.encoder_prompt!r}, "
             f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
+            f"prompt_moe_topk_indices={self.prompt_moe_topk_indices}, "
+            f"moe_metadata={self.moe_metadata}, "
             f"outputs={self.outputs}, "
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "

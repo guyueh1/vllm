@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 import torch
@@ -13,6 +14,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
@@ -183,6 +185,53 @@ class DPMetadata:
 
 
 @dataclass
+class MoEMetadata:
+    num_moe_layers: int | None = None
+    num_experts: int | None = None
+    expert_bits: int | None = None
+    topk: int | None = None
+    enable_moe_topk_indices: bool | None = None
+
+    @staticmethod
+    def make(model, model_config) -> "MoEMetadata":
+        num_moe_layers = model.num_moe_layers
+        num_experts = model.num_routed_experts
+        topks = []
+        for moe_layer_idx, layer in enumerate(model.moe_layers):
+            layer.moe_layer_idx = moe_layer_idx
+            topks.append(layer.top_k)
+        topk = None
+        if topks:
+            topk = topks[0]
+            for topk_ in topks[1:]:
+                if topk != topk_:
+                    logger.info(f"MoEMetadata: warning: non-matching MoE layer top-K: {topk} != {topk_}")
+                    topk = None
+                    break
+        return MoEMetadata(
+            num_moe_layers=num_moe_layers,
+            num_experts=num_experts,
+            topk=topk,
+            enable_moe_topk_indices=model_config.enable_moe_topk_indices,
+        )
+
+    def calculate_expert_bits(self) -> int:
+        if self.expert_bits is not None:
+            return self.expert_bits
+        self.expert_bits = int(math.ceil(math.log2(self.num_experts)))
+        return self.expert_bits
+
+
+@dataclass
+class MoETopkIndicesCapture:
+    """Shared buffers for capturing per-layer MoE top-k ids inside a cudagraph."""
+
+    buffers: list[torch.Tensor]
+    layer_id_to_index: dict[int, int]
+    token_offset: int = 0
+
+
+@dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
@@ -197,6 +246,7 @@ class ForwardContext:
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
+    moe_metadata: MoEMetadata | None = None
     dp_metadata: DPMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
     # by default NONE, no cudagraph is used.
@@ -204,6 +254,11 @@ class ForwardContext:
     batch_descriptor: BatchDescriptor | None = None
 
     ubatch_slices: UBatchSlices | None = None
+
+    # Collect per-MoE-layer top-k expert indices during the forward pass.
+    moe_topk_indices: list[torch.Tensor] = field(default_factory=list)
+
+    additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
@@ -231,19 +286,23 @@ def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
     virtual_engine: int = 0,
+    moe_metadata: MoEMetadata | None = None,
     dp_metadata: DPMetadata | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
+    additional_kwargs: dict[str, Any] | None = None,
 ):
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
+        moe_metadata=moe_metadata,
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
+        additional_kwargs=additional_kwargs or {},
     )
 
 
@@ -267,6 +326,7 @@ def set_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
     virtual_engine: int = 0,
+    moe_metadata: MoEMetadata | None = None,
     num_tokens: int | None = None,
     num_tokens_across_dp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -309,14 +369,27 @@ def set_forward_context(
     if cudagraph_runtime_mode != CUDAGraphMode.NONE and num_tokens is not None:
         batch_descriptor = batch_descriptor or BatchDescriptor(num_tokens=num_tokens)
 
+    additional_kwargs = current_platform.set_additional_forward_context(
+        attn_metadata=attn_metadata,
+        vllm_config=vllm_config,
+        virtual_engine=virtual_engine,
+        num_tokens=num_tokens,
+        num_tokens_across_dp=num_tokens_across_dp,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
+        batch_descriptor=batch_descriptor,
+        ubatch_slices=ubatch_slices,
+    )
+
     forward_context = create_forward_context(
         attn_metadata,
         vllm_config,
         virtual_engine,
+        moe_metadata,
         dp_metadata,
         cudagraph_runtime_mode,
         batch_descriptor,
         ubatch_slices,
+        additional_kwargs,
     )
 
     try:
@@ -329,8 +402,6 @@ def set_forward_context(
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch
-            from vllm.platforms import current_platform
-
             synchronize = current_platform.synchronize
             if synchronize is not None:
                 synchronize()

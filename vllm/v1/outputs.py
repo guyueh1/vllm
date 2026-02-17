@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.forward_context import MoEMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -31,6 +32,8 @@ class LogprobsLists(NamedTuple):
     # decoding where the number of generated tokens may be
     # different for each request.
     cu_num_generated_tokens: list[int] | None = None
+    # [num_reqs x num_generated_tokens, num_moe_layers, topk]
+    moe_topk_indices: np.ndarray | None = None
 
     def slice_request(self, req_idx: int, num_positions: int):
         if self.cu_num_generated_tokens is not None:
@@ -41,6 +44,7 @@ class LogprobsLists(NamedTuple):
             self.logprobs[req_idx:end_idx],
             self.sampled_token_ranks[req_idx:end_idx],
             None,
+            self.moe_topk_indices[req_idx:end_idx] if self.moe_topk_indices is not None else None,
         )
 
 
@@ -51,13 +55,16 @@ class LogprobsTensors(NamedTuple):
     logprobs: torch.Tensor
     # [num_reqs x num_generated_tokens]
     selected_token_ranks: torch.Tensor
+    # [num_reqs x num_generated_tokens, num_moe_layers, topk]
+    moe_topk_indices: torch.Tensor | None = None
 
-    def tolists(self, cu_num_generated_tokens: list[int] | None = None):
+    def tolists_cpu(self, cu_num_generated_tokens: list[int] | None = None):
         return LogprobsLists(
             self.logprob_token_ids.cpu().numpy(),
             self.logprobs.cpu().numpy(),
             self.selected_token_ranks.cpu().numpy(),
             cu_num_generated_tokens,
+            self.moe_topk_indices.cpu().numpy() if self.moe_topk_indices is not None else None,
         )
 
     def to_cpu_nonblocking(self) -> "LogprobsTensors":
@@ -67,11 +74,15 @@ class LogprobsTensors(NamedTuple):
             self.logprob_token_ids.to("cpu", non_blocking=True),
             self.logprobs.to("cpu", non_blocking=True),
             self.selected_token_ranks.to("cpu", non_blocking=True),
+            self.moe_topk_indices.to("cpu", non_blocking=True) if self.moe_topk_indices is not None else None,
         )
 
     @staticmethod
     def empty_cpu(
-        num_positions: int, num_tokens_per_position: int
+        num_positions: int,
+        num_tokens_per_position: int,
+        num_moe_layers: int | None = None,
+        topk: int | None = None,
     ) -> "LogprobsTensors":
         """Create empty LogprobsTensors on CPU."""
 
@@ -82,10 +93,16 @@ class LogprobsTensors(NamedTuple):
         selected_token_ranks = torch.empty(
             num_positions, dtype=torch.int32, device="cpu"
         )
+        moe_topk_indices = None
+        if num_moe_layers is not None and topk is not None:
+            moe_topk_indices = torch.empty(
+                (num_positions, num_moe_layers, topk), dtype=torch.int16, device="cpu"
+            )
         return LogprobsTensors(
             logprob_token_ids=logprob_token_ids,
             logprobs=logprobs,
             selected_token_ranks=selected_token_ranks,
+            moe_topk_indices=moe_topk_indices,
         )
 
 
@@ -156,12 +173,16 @@ class ModelRunnerOutput:
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
+    # Produced in the model runner (CPU lists) and sliced per-request in
+    # the scheduler into EngineCoreOutput.new_logprobs.
     logprobs: LogprobsLists | None
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
+    # Prompt logprobs stay as tensors until they are attached to
+    # EngineCoreOutput.new_prompt_logprobs_tensors and processed in the engine.
     prompt_logprobs_dict: dict[str, LogprobsTensors | None]
 
     # [num_reqs, hidden_size]
@@ -176,6 +197,8 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    moe_metadata: MoEMetadata | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

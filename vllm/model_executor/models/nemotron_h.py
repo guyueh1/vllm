@@ -29,9 +29,17 @@ from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_ep_group,
+    # get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
@@ -53,6 +61,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_outputs import ModelForwardOutput
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -77,6 +86,9 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronHConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class NemotronHMLP(nn.Module):
@@ -243,6 +255,8 @@ class NemotronHMoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         # router_logits: (num_tokens, n_experts)
+        # Router logits feed the shared fused MoE router, which computes
+        # top-k expert indices inside FusedMoE._select_experts.
         router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
         shared_output = None
         if self.use_latent_moe:
@@ -250,6 +264,8 @@ class NemotronHMoE(nn.Module):
                 shared_output = self.shared_experts(hidden_states)
             hidden_states, _ = self.fc1_latent_proj(hidden_states)
 
+        # SharedFusedMoE forwards router_logits into the fused MoE kernels,
+        # producing top-k expert ids and weights for each token.
         fused_moe_out = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
@@ -868,6 +884,8 @@ class NemotronHForCausalLM(
             self.num_shared_experts = example_moe.n_shared_experts
             self.num_redundant_experts = example_moe.n_redundant_experts
 
+        # self.tp_rank = get_tensor_model_parallel_rank()
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -900,7 +918,14 @@ class NemotronHForCausalLM(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
 
-        return hidden_states
+        return ModelForwardOutput(
+            hidden_states=hidden_states,
+            aux_hidden_states=None,
+            # NB: need to return None here, otherwise can stall cudagraph/compilation.
+            moe_topk_indices=None,
+            moe_topk_indices_tensor=None,
+            dummy_tensor=None,
+        )
 
     def compute_logits(
         self,

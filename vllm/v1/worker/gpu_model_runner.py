@@ -51,6 +51,10 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import (
     BatchDescriptor,
+    MoEMetadata,
+    MoETopkIndicesCapture,
+    get_forward_context,
+    is_forward_context_available,
     set_forward_context,
 )
 from vllm.logger import init_logger
@@ -60,6 +64,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     XDRotaryEmbedding,
 )
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.model_outputs import ModelForwardOutput
 from vllm.model_executor.models.interfaces import (
     SupportsMRoPE,
     SupportsMultiModal,
@@ -248,8 +253,21 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         if self._logprobs_tensors_cpu:
-            output.logprobs = self._logprobs_tensors_cpu.tolists(cu_num_tokens)
+            output.logprobs = self._logprobs_tensors_cpu.tolists_cpu(cu_num_tokens)
         return output
+
+
+class ModelForwardTensors(NamedTuple):
+    """Intermediate tensors from model forward through logits projection."""
+
+    hidden_states: torch.Tensor
+    sample_hidden_states: torch.Tensor
+    logits: torch.Tensor | None
+    logits_indices: torch.Tensor | None
+    # One tensor per routed MoE layer, shaped [num_tokens, top_k]. In cudagraph
+    # mode, these may be views into shared buffers updated by the graph.
+    moe_topk_indices: list[torch.Tensor] | None
+    sample_moe_topk_indices: torch.Tensor | None
 
 
 class ExecuteModelState(NamedTuple):
@@ -257,11 +275,9 @@ class ExecuteModelState(NamedTuple):
     sample_tokens(), after execute_model() returns None."""
 
     scheduler_output: "SchedulerOutput"
-    logits: torch.Tensor
+    forward_tensors: ModelForwardTensors
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: CommonAttentionMetadata | None
-    hidden_states: torch.Tensor
-    sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
@@ -309,6 +325,14 @@ class GPUModelRunner(
         )
         # This will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
+        # MoE layer metadata for top-k routing capture.
+        self._moe_layer_ids: list[int] = []
+        self._moe_layer_id_to_index: dict[int, int] = {}
+        self._moe_topk_sizes: list[int] = []
+        self._moe_topk_dtypes: list[torch.dtype] = []
+        self._cudagraph_moe_topk_buffers: dict[
+            BatchDescriptor, list[torch.Tensor]
+        ] = {}
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -351,6 +375,8 @@ class GPUModelRunner(
             self.max_encoder_len = scheduler_config.max_num_encoder_input_tokens
         else:
             self.max_encoder_len = 0
+
+        self.moe_metadata: MoEMetadata | None = None
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
@@ -2449,6 +2475,7 @@ class GPUModelRunner(
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
+            moe_metadata=self.moe_metadata,
         )
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
@@ -2580,8 +2607,10 @@ class GPUModelRunner(
         self,
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
+        sample_moe_topk_indices: list[torch.Tensor] | None,
     ) -> SamplerOutput:
-        # Sample the next token and get logprobs if needed.
+        # Sample the next token and compute logprobs tensors if requested.
+        # This path is identical for eager vs compiled/cudagraph.
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
             # Update output token ids with tokens sampled in last step
@@ -2590,6 +2619,7 @@ class GPUModelRunner(
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
+                sample_moe_topk_indices=sample_moe_topk_indices,
             )
 
         sampler_output = self.rejection_sampler(
@@ -2597,6 +2627,7 @@ class GPUModelRunner(
             None,  # draft_probs
             logits,
             sampling_metadata,
+            sample_moe_topk_indices=sample_moe_topk_indices,
         )
         self._update_states_after_model_execute(sampler_output.sampled_token_ids)
         return sampler_output
@@ -2605,8 +2636,7 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         sampler_output: SamplerOutput,
-        logits: torch.Tensor | None,
-        hidden_states: torch.Tensor,
+        forward_tensors: ModelForwardTensors,
         num_scheduled_tokens: int,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
@@ -2620,7 +2650,9 @@ class GPUModelRunner(
     ]:
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
-            num_nans_in_logits = self._get_nans_in_logits(logits)
+            num_nans_in_logits = self._get_nans_in_logits(
+                forward_tensors.logits
+            )
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
@@ -2639,6 +2671,9 @@ class GPUModelRunner(
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
         logprobs_tensors = sampler_output.logprobs_tensors
+        # logger.info(f"_bookkeeping_sync: logprobs tensors logprobs shape = {logprobs_tensors.logprobs.shape}")
+        # logprobs_tensors (if present) contain top-k ids/logprobs per token
+        # derived from the model logits in the sampler.
         invalid_req_indices = []
         cu_num_tokens: list[int] | None = None
         if not self.use_async_scheduling:
@@ -2709,16 +2744,21 @@ class GPUModelRunner(
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
+        # Logprobs are produced on-device by the sampler from logits; the
+        # eager vs compiled/cudagraph choice does not change this path.
+        # Convert to CPU lists for ModelRunnerOutput serialization.
         logprobs_lists = (
-            logprobs_tensors.tolists(cu_num_tokens)
+            logprobs_tensors.tolists_cpu(cu_num_tokens)
             if not self.use_async_scheduling and logprobs_tensors is not None
             else None
         )
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-            hidden_states[:num_scheduled_tokens],
+            forward_tensors.hidden_states[:num_scheduled_tokens],
+            forward_tensors.moe_topk_indices,
             scheduler_output.num_scheduled_tokens,
+            # num_scheduled_tokens,
         )
 
         return (
@@ -2746,6 +2786,27 @@ class GPUModelRunner(
         finally:
             self.prepare_inputs_event.record()
 
+    def _get_or_create_cudagraph_moe_topk_buffers(
+        self, batch_descriptor: BatchDescriptor
+    ) -> list[torch.Tensor] | None:
+        if not self._moe_layer_ids:
+            return None
+        buffers = self._cudagraph_moe_topk_buffers.get(batch_descriptor)
+        if buffers is None:
+            num_tokens = batch_descriptor.num_tokens
+            buffers = [
+                torch.empty(
+                    (num_tokens, topk),
+                    device=self.device,
+                    dtype=dtype,
+                )
+                for topk, dtype in zip(self._moe_topk_sizes, self._moe_topk_dtypes)
+            ]
+            # Persist buffers per batch descriptor so cudagraph replay sees
+            # stable tensor addresses.
+            self._cudagraph_moe_topk_buffers[batch_descriptor] = buffers
+        return buffers
+
     def _model_forward(
         self,
         input_ids: torch.Tensor | None = None,
@@ -2753,7 +2814,7 @@ class GPUModelRunner(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **model_kwargs: dict[str, Any],
-    ) -> Any:
+    ) -> ModelForwardOutput:
         """Helper method to call the model forward pass.
 
         This method can be overridden by subclasses for model execution.
@@ -2768,14 +2829,88 @@ class GPUModelRunner(
             **model_kwargs: Additional model arguments
 
         Returns:
-            Model output tensor
+            ModelForwardOutput with hidden_states, aux_hidden_states, and
+            collected MoE top-k indices (if any).
         """
-        return self.model(
+        if is_forward_context_available():
+            forward_context = get_forward_context()
+            if (
+                forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
+                and forward_context.batch_descriptor is not None
+                and self._moe_layer_id_to_index
+            ):
+                buffers = self._get_or_create_cudagraph_moe_topk_buffers(
+                    forward_context.batch_descriptor
+                )
+                if buffers is not None:
+                    # Store shared buffers so MoE layers can copy top-k ids
+                    # into them during cudagraph capture/replay.
+                    forward_context.additional_kwargs["moe_topk_indices_capture"] = (
+                        MoETopkIndicesCapture(
+                            buffers=buffers,
+                            layer_id_to_index=self._moe_layer_id_to_index,
+                            token_offset=0,
+                        )
+                    )
+        # Forward call is eager when cudagraph_runtime_mode=NONE; otherwise it
+        # may be compiled/cudagraph-wrapped and replayed to produce hidden_states.
+        output = self.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **model_kwargs,
+        )
+        moe_topk_indices = None
+        if is_forward_context_available():
+            forward_context = get_forward_context()
+            # In eager mode, MoE layers append per-layer tensors to the forward
+            # context. In cudagraph mode, MoE layers copy into shared buffers
+            # that we reuse to build the per-layer list below.
+            moe_topk_indices = forward_context.moe_topk_indices
+            if not moe_topk_indices:
+                moe_topk_indices_capture = forward_context.additional_kwargs.get(
+                    "moe_topk_indices_capture"
+                )
+                if moe_topk_indices_capture is not None:
+                    moe_topk_indices = moe_topk_indices_capture.buffers
+        if isinstance(output, ModelForwardOutput):
+            assert output.moe_topk_indices is None
+            return ModelForwardOutput(
+                hidden_states=output.hidden_states,
+                aux_hidden_states=output.aux_hidden_states,
+                moe_topk_indices=moe_topk_indices,
+                moe_topk_indices_tensor=None,
+                dummy_tensor=None,
+            )
+        output_moe_topk_indices = None
+        if isinstance(output, tuple):
+            # In compiled/cudagraph dummy runs, ModelForwardOutput
+            # can be returned as a plain tuple, losing its NamedTuple type.
+            # Normalize here so downstream logprobs see a consistent shape.
+            if len(output) == 2:
+                hidden_states, aux_hidden_states = output
+            elif len(output) == 3:
+                hidden_states, aux_hidden_states, output_moe_topk_indices = output
+            elif len(output) == 5:
+                hidden_states, aux_hidden_states, output_moe_topk_indices, _, _ = output
+            else:
+                raise ValueError(
+                    "Expected model forward to return 2-tuple or 3-tuple, "
+                    f"got {len(output)} items."
+                )
+        else:
+            hidden_states = output
+            aux_hidden_states = None
+            output_moe_topk_indices = None
+        if output_moe_topk_indices is None:
+            output_moe_topk_indices = moe_topk_indices
+        return ModelForwardOutput(
+            hidden_states=hidden_states,
+            aux_hidden_states=aux_hidden_states,
+            moe_topk_indices=output_moe_topk_indices,
+            moe_topk_indices_tensor=None,
+            dummy_tensor=None,
         )
 
     @staticmethod
@@ -2840,6 +2975,8 @@ class GPUModelRunner(
         )
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        # Eager path uses CUDAGraphMode.NONE; compiled/cudagraph path uses the
+        # dispatcher to pick runtime mode and padded batch shapes for replay.
         dispatch_cudagraph = (
             lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
@@ -3130,10 +3267,14 @@ class GPUModelRunner(
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
+        # Eager path: cudagraph_runtime_mode=NONE runs a direct forward.
+        # CUDAGraph/compiled path: runtime mode + batch_descriptor enable
+        # capture/replay on padded shapes while still producing hidden_states.
         with (
             set_forward_context(
                 attn_metadata,
                 self.vllm_config,
+                moe_metadata=self.moe_metadata,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_mode,
@@ -3152,12 +3293,19 @@ class GPUModelRunner(
             )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
+            # ModelForwardOutput carries the last hidden states from the model
+            # forward pass, which are later sliced into logits inputs.
+            hidden_states = model_output.hidden_states
+            moe_topk_indices = model_output.moe_topk_indices
+            sample_moe_topk_indices = None
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
-                hidden_states, aux_hidden_states = model_output
+                # Aux hidden states originate from model forward and are used
+                # later to build Eagle draft inputs.
+                aux_hidden_states = model_output.aux_hidden_states
+                assert aux_hidden_states is not None
             else:
                 # Common case.
-                hidden_states = model_output
                 aux_hidden_states = None
 
             if not self.broadcast_pp_output:
@@ -3177,12 +3325,19 @@ class GPUModelRunner(
                     output.kv_connector_output = kv_connector_output
                     return output
 
+                # Gather token positions to score and project to logits.
+                # Shared logprobs path: logits come from hidden_states at
+                # logits_indices; cudagraph/compile only change how
+                # hidden_states were produced.
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
 
+                # Shared logprobs path: logits come from hidden_states at
+                # logits_indices; cudagraph/compile only change how
+                # hidden_states were produced before this point.
                 sample_hidden_states = hidden_states[logits_indices]
                 if not get_pp_group().is_last_rank:
                     all_gather_tensors = {
@@ -3209,13 +3364,31 @@ class GPUModelRunner(
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
+            if moe_topk_indices is not None:
+                assert isinstance(moe_topk_indices, list)
+                sample_moe_topk_indices = []
+                for moe_topk_indices_per_layer in moe_topk_indices:
+                    sample_moe_topk_indices.append(
+                        moe_topk_indices_per_layer[logits_indices]
+                    )
+                # sample_moe_topk_indices = torch.stack(sample_moe_topk_indices, dim=1)
+                sample_moe_topk_indices = torch.transpose(
+                    torch.stack(sample_moe_topk_indices, dim=0), 0, 1
+                )
+
+        forward_tensors = ModelForwardTensors(
+            hidden_states=hidden_states,
+            sample_hidden_states=sample_hidden_states,
+            logits=logits,
+            logits_indices=logits_indices,
+            moe_topk_indices=moe_topk_indices,
+            sample_moe_topk_indices=sample_moe_topk_indices,
+        )
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
-            logits,
+            forward_tensors,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
-            hidden_states,
-            sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
             cudagraph_stats,
@@ -3247,17 +3420,21 @@ class GPUModelRunner(
         # Unpack ephemeral state.
         (
             scheduler_output,
-            logits,
+            forward_tensors,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
-            hidden_states,
-            sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
             cudagraph_stats,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
+
+        hidden_states = forward_tensors.hidden_states
+        sample_hidden_states = forward_tensors.sample_hidden_states
+        logits = forward_tensors.logits
+        moe_topk_indices = forward_tensors.moe_topk_indices
+        sample_moe_topk_indices = forward_tensors.sample_moe_topk_indices
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
@@ -3266,7 +3443,33 @@ class GPUModelRunner(
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            # Sampler turns logits into sampled token ids and optional
+            # logprobs tensors for downstream serialization.
+            sampler_output = self._sample(
+                logits,
+                spec_decode_metadata,
+                sample_moe_topk_indices,
+            )
+
+        if False:
+            if hidden_states is not None:
+                logger.info(f"sample_tokens: hidden_states           shape = {hidden_states.shape} ntokens = {scheduler_output.total_num_scheduled_tokens}")
+            if sample_hidden_states is not None:
+                logger.info(f"sample_tokens: sample_hidden_states    shape = {sample_hidden_states.shape} ntokens = {scheduler_output.total_num_scheduled_tokens}")
+            if logits is not None:
+                logger.info(f"sample_tokens: logits                  shape = {logits.shape} ntokens = {scheduler_output.total_num_scheduled_tokens}")
+            if forward_tensors.moe_topk_indices:
+                logger.info(f"sample_tokens: moe_topk_indices[0]     shape = {forward_tensors.moe_topk_indices[0].shape} ntokens = {scheduler_output.total_num_scheduled_tokens}")
+            # if forward_tensors.moe_topk_indices_tensor is not None:
+            #     logger.info(f"sample_tokens: moe_topk_indices_tensor shape = {forward_tensors.moe_topk_indices_tensor.shape} ntokens = {scheduler_output.total_num_scheduled_tokens}")
+            # if forward_tensors.sample_moe_topk_indices:
+            #     logger.info(f"sample_tokens: sample_moe_topk_indices shape = {forward_tensors.sample_moe_topk_indices[0].shape} ntokens = {scheduler_output.total_num_scheduled_tokens}")
+            if forward_tensors.sample_moe_topk_indices is not None:
+                logger.info(f"sample_tokens: sample_moe_topk_indices shape = {forward_tensors.sample_moe_topk_indices.shape} ntokens = {scheduler_output.total_num_scheduled_tokens}")
+            if sampler_output.logprobs_tensors.logprobs is not None:
+                logger.info(f"sample_tokens: sampler output logprobs shape = {sampler_output.logprobs_tensors.logprobs.shape} ntokens = {scheduler_output.total_num_scheduled_tokens}")
+            if sampler_output.logprobs_tensors.moe_topk_indices is not None:
+                logger.info(f"sample_tokens: sampler output moe topk shape = {sampler_output.logprobs_tensors.moe_topk_indices.shape} ntokens = {scheduler_output.total_num_scheduled_tokens}")
 
         self.input_batch.prev_sampled_token_ids = None
 
@@ -3340,8 +3543,7 @@ class GPUModelRunner(
             ) = self._bookkeeping_sync(
                 scheduler_output,
                 sampler_output,
-                logits,
-                hidden_states,
+                forward_tensors,
                 scheduler_output.total_num_scheduled_tokens,
                 spec_decode_metadata,
             )
@@ -3371,6 +3573,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                moe_metadata=self.moe_metadata,
             )
 
         if not self.use_async_scheduling:
@@ -3543,6 +3746,8 @@ class GPUModelRunner(
                 target_positions = self._get_positions(num_scheduled_tokens)
                 if self.use_aux_hidden_state_outputs:
                     assert aux_hidden_states is not None
+                    # Eagle spec decode concatenates aux hidden states to form
+                    # the target hidden states used by the drafter.
                     target_hidden_states = torch.cat(
                         [h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1
                     )
@@ -3560,6 +3765,7 @@ class GPUModelRunner(
                     target_positions = self._get_positions(token_indices)
                     if self.use_aux_hidden_state_outputs:
                         assert aux_hidden_states is not None
+                        # Use per-token aux hidden states for Eagle draft inputs.
                         target_hidden_states = torch.cat(
                             [h[token_indices] for h in aux_hidden_states], dim=-1
                         )
@@ -3579,6 +3785,8 @@ class GPUModelRunner(
                     target_positions = self._get_positions(total_num_tokens)
                     if self.use_aux_hidden_state_outputs:
                         assert aux_hidden_states is not None
+                        # Padded path: concatenate aux hidden states over
+                        # the padded batch for Eagle.
                         target_hidden_states = torch.cat(
                             [h[:total_num_tokens] for h in aux_hidden_states], dim=-1
                         )
@@ -3737,7 +3945,11 @@ class GPUModelRunner(
             and mm_config.is_multimodal_pruning_enabled()
         )
 
-        if is_mixture_of_experts(self.model) and self.parallel_config.enable_eplb:
+        is_moe = is_mixture_of_experts(self.model)
+        if is_moe:
+            self.moe_metadata = MoEMetadata.make(self.model, self.model_config)
+            logger.info_once(f"MoEMetadata: num moe layers = {self.moe_metadata.num_moe_layers} topk = {self.moe_metadata.topk}")
+        if is_moe and self.parallel_config.enable_eplb:
             logger.info_once("EPLB is enabled for model %s.", self.model_config.model)
             global_expert_load = (
                 global_expert_loads[eplb_models] if global_expert_loads else None
@@ -3765,6 +3977,8 @@ class GPUModelRunner(
         ):
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
             compilation_counter.stock_torch_compile_count += 1
+            # Compiled path: forward (and hidden_states) come from a
+            # torch.compile graph instead of eager execution.
             self.model.compile(fullgraph=True, backend=backend)
             return
         # for other compilation modes, cudagraph behavior is controlled by
@@ -3777,6 +3991,8 @@ class GPUModelRunner(
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
+            # CUDAGraph path: forward (and hidden_states) may be captured/replayed
+            # via the wrapper when cudagraph_runtime_mode is enabled.
             self.model = CUDAGraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )
@@ -3789,6 +4005,25 @@ class GPUModelRunner(
                 self.model = UBatchWrapper(
                     self.model, self.vllm_config, CUDAGraphMode.NONE, self.device
                 )
+
+        raw_model = self.get_model()
+        self._moe_layer_ids = []
+        self._moe_layer_id_to_index = {}
+        self._moe_topk_sizes = []
+        self._moe_topk_dtypes = []
+        self._cudagraph_moe_topk_buffers.clear()
+        if is_moe:
+            assert is_mixture_of_experts(raw_model)
+            # Preserve MoE-only layer ordering to match forward_context appends.
+            self._moe_layer_ids = [layer.layer_id for layer in raw_model.moe_layers]
+            self._moe_layer_id_to_index = {
+                layer_id: idx for idx, layer_id in enumerate(self._moe_layer_ids)
+            }
+            self._moe_topk_sizes = [layer.top_k for layer in raw_model.moe_layers]
+            self._moe_topk_dtypes = [
+                layer.quant_method.topk_indices_dtype or torch.int16
+                for layer in raw_model.moe_layers
+            ]
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.
@@ -3835,7 +4070,10 @@ class GPUModelRunner(
     def _get_prompt_logprobs_dict(
         self,
         hidden_states: torch.Tensor,
+        moe_topk_indices: list[torch.Tensor] | None,
         num_scheduled_tokens: dict[str, int],
+        # scalar_num_scheduled_tokens: int,
+    # ) -> tuple[dict[str, LogprobsTensors | None], dict[str, list[torch.Tensor]]]:
     ) -> dict[str, LogprobsTensors | None]:
         num_prompt_logprobs_dict = self.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
@@ -3843,6 +4081,12 @@ class GPUModelRunner(
 
         in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
         prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
+
+        moe_topk_indices_tensor = None
+        if moe_topk_indices is not None and num_prompt_logprobs_dict:
+            moe_topk_indices_tensor = torch.transpose(
+                torch.stack(moe_topk_indices, dim=0), 0, 1
+            )
 
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
@@ -3869,8 +4113,16 @@ class GPUModelRunner(
             if not logprobs_tensors:
                 # Create empty logprobs CPU tensors for the entire prompt.
                 # If chunked, we'll copy in slice by slice.
+                num_moe_layers = None
+                topk = None
+                if self.moe_metadata is not None:
+                    num_moe_layers = self.moe_metadata.num_moe_layers
+                    topk = self.moe_metadata.topk
                 logprobs_tensors = LogprobsTensors.empty_cpu(
-                    num_prompt_tokens - 1, num_prompt_logprobs + 1
+                    num_positions=num_prompt_tokens - 1,
+                    num_tokens_per_position=num_prompt_logprobs + 1,
+                    num_moe_layers=num_moe_layers,
+                    topk=topk,
                 )
                 in_progress_dict[req_id] = logprobs_tensors
 
@@ -3902,6 +4154,8 @@ class GPUModelRunner(
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc.np[req_idx].item()
             prompt_hidden_states = hidden_states[offset : offset + num_logits]
+            # Prompt logprobs come from prefill hidden_states; eager vs
+            # compiled/cudagraph only affects how those hidden_states were made.
             logits = self.model.compute_logits(prompt_hidden_states)
 
             # Get the "target" tokens for each index. For prompt at index i,
@@ -3911,18 +4165,30 @@ class GPUModelRunner(
 
             # Compute prompt logprobs.
             logprobs = self.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks = self.sampler.gather_logprobs(
+            gathered_logprobs_tensors = self.sampler.gather_logprobs(
                 logprobs, num_prompt_logprobs, tgt_token_ids
             )
+            token_ids = gathered_logprobs_tensors.logprob_token_ids
+            logprobs = gathered_logprobs_tensors.logprobs
+            ranks = gathered_logprobs_tensors.selected_token_ranks
 
             # Transfer GPU->CPU async.
             chunk_slice = slice(start_idx, start_idx + num_logits)
+            # Copy this step's prompt logprobs into the preallocated
+            # [prompt_len, num_logprobs] tensors, effectively concatenating
+            # chunks along the prompt token dimension.
             logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
                 token_ids, non_blocking=True
             )
             logprobs_tensors.logprobs[chunk_slice].copy_(logprobs, non_blocking=True)
             logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
                 ranks, non_blocking=True
+            )
+            # Copy this step's MoE top-k ids into the preallocated
+            # [prompt_len, top_k] tensors for the request.
+            logprobs_tensors.moe_topk_indices[chunk_slice].copy_(
+                moe_topk_indices_tensor[offset : offset + num_logits],
+                non_blocking=True,
             )
 
         # Remove requests that have completed prefill from the batch
@@ -4263,6 +4529,7 @@ class GPUModelRunner(
                 set_forward_context(
                     attn_metadata,
                     self.vllm_config,
+                    moe_metadata=self.moe_metadata,
                     num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -4270,7 +4537,7 @@ class GPUModelRunner(
                     ubatch_slices=ubatch_slices_padded,
                 ),
             ):
-                outputs = self.model(
+                model_output = self._model_forward(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
@@ -4278,10 +4545,7 @@ class GPUModelRunner(
                     **model_kwargs,
                 )
 
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = outputs
-            else:
-                hidden_states = outputs
+            hidden_states = model_output.hidden_states
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)

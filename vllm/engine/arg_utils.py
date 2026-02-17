@@ -444,6 +444,10 @@ class EngineArgs:
     max_num_seqs: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
+    enable_moe_topk_indices: bool = ModelConfig.enable_moe_topk_indices
+    enable_moe_topk_indices_nemo_rl_block_cache: bool = (
+        ModelConfig.enable_moe_topk_indices_nemo_rl_block_cache
+    )
     disable_log_stats: bool = False
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
@@ -486,6 +490,7 @@ class EngineArgs:
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
 
+    disable_ray_cgraph: bool = ParallelConfig.disable_ray_cgraph
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
@@ -650,6 +655,13 @@ class EngineArgs:
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
+        model_group.add_argument(
+            "--enable-moe-topk-indices", **model_kwargs["enable_moe_topk_indices"]
+        )
+        model_group.add_argument(
+            "--enable-moe-topk-indices-nemo-rl-block-cache",
+            **model_kwargs["enable_moe_topk_indices_nemo_rl_block_cache"],
+        )
         model_group.add_argument(
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
         )
@@ -871,6 +883,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"],
+        )
+        parallel_group.add_argument(
+            "--disable-ray-cgraph", **parallel_kwargs["disable_ray_cgraph"]
         )
         parallel_group.add_argument(
             "--ray-workers-use-nsight", **parallel_kwargs["ray_workers_use_nsight"]
@@ -1220,6 +1235,10 @@ class EngineArgs:
             enforce_eager=self.enforce_eager,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
+            enable_moe_topk_indices=self.enable_moe_topk_indices,
+            enable_moe_topk_indices_nemo_rl_block_cache=(
+                self.enable_moe_topk_indices_nemo_rl_block_cache
+            ),
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
@@ -1583,6 +1602,7 @@ class EngineArgs:
             expert_placement_strategy=self.expert_placement_strategy,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
+            disable_ray_cgraph=self.disable_ray_cgraph,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             ray_runtime_env=ray_runtime_env,
             placement_group=placement_group,

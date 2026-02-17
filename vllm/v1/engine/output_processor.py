@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import torch
 
+from vllm.forward_context import MoEMetadata
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     CompletionOutput,
@@ -204,6 +205,8 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
+        *,
+        moe_metadata: MoEMetadata | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -253,7 +256,11 @@ class RequestState:
                 return None
 
         return self._new_request_output(
-            request_id, outputs, finished, kv_transfer_params
+            request_id,
+            outputs,
+            finished,
+            kv_transfer_params,
+            moe_metadata=moe_metadata,
         )
 
     def _new_request_output(
@@ -262,6 +269,8 @@ class RequestState:
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
+        *,
+        moe_metadata: MoEMetadata | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
@@ -279,13 +288,18 @@ class RequestState:
         if self.output_kind == RequestOutputKind.DELTA:
             # Side effect: logprobs processor forgets prompt logprobs
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
+            prompt_moe_topk_indices = self.logprobs_processor.pop_prompt_moe_topk_indices()
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
+            prompt_moe_topk_indices = self.logprobs_processor.prompt_moe_topk_indices
 
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
         if prompt_token_ids is None and self.prompt_embeds is not None:
             prompt_token_ids = [0] * len(self.prompt_embeds)
+
+        if moe_metadata is None and self.logprobs_processor is not None:
+            moe_metadata = self.logprobs_processor.moe_metadata
 
         return RequestOutput(
             request_id=request_id,
@@ -293,6 +307,8 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
+            prompt_moe_topk_indices=prompt_moe_topk_indices,
+            moe_metadata=moe_metadata,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
@@ -316,16 +332,22 @@ class RequestState:
         if not delta:
             token_ids = self.detokenizer.output_token_ids
 
-        # Prepare logprobs, based on delta mode
+        # Prepare logprobs, based on delta mode.
+        # Logprobs are per-request dicts assembled by LogprobsProcessor.
         logprobs = self.logprobs_processor.logprobs
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
+
+        moe_topk_indices = self.logprobs_processor.sample_moe_topk_indices
+        if delta and moe_topk_indices:
+            moe_topk_indices = moe_topk_indices[-len(token_ids) :]
 
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             logprobs=logprobs,
+            moe_topk_indices=moe_topk_indices,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
@@ -502,6 +524,8 @@ class OutputProcessor:
 
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
+                # This consumes EngineCoreOutput.new_logprobs /
+                # new_prompt_logprobs_tensors into per-request logprob lists.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
@@ -511,6 +535,7 @@ class OutputProcessor:
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
+                moe_metadata=engine_core_output.moe_metadata,
             ):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().

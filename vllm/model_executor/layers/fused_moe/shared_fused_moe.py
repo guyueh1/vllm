@@ -76,11 +76,13 @@ class SharedFusedMoE(FusedMoE):
             else:
                 shared_out = None
 
+            # FusedMoE forward computes top-k routing from router_logits.
             fused_out = super().forward(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
             )
         else:
+            # FusedMoE forward computes top-k routing from router_logits.
             shared_out, fused_out = super().forward(
                 hidden_states=hidden_states,
                 router_logits=router_logits,

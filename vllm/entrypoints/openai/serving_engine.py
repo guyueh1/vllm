@@ -442,6 +442,7 @@ class OpenAIServing:
                         finished=True,
                         prompt_token_ids=prompt_token_ids,
                         prompt_logprobs=None,
+                        moe_metadata=result.moe_metadata,
                     )
                     return
 
@@ -539,6 +540,7 @@ class OpenAIServing:
             finished=True,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=None,
+            moe_metadata=output[0].moe_metadata if output else None,
         )
 
     def _get_renderer(self, tokenizer: TokenizerLike | None) -> BaseRenderer:

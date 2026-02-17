@@ -68,6 +68,7 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        sample_moe_topk_indices: torch.Tensor | None = None,
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
     ) -> SamplerOutput:
@@ -78,7 +79,10 @@ class Sampler(nn.Module):
         # is used for sampling (after penalties and temperature scaling).
         num_logprobs = sampling_metadata.max_num_logprobs
         if num_logprobs is not None:
+            # Logits already come from hidden_states upstream; eager vs
+            # compiled/cudagraph does not change the logprobs math here.
             if logprobs_mode == "raw_logprobs":
+                # Convert logits -> logprobs before top-k gathering.
                 raw_logprobs = self.compute_logprobs(logits)
             elif logprobs_mode == "raw_logits":
                 if logits.dtype == torch.float32:
@@ -107,12 +111,19 @@ class Sampler(nn.Module):
         elif num_logprobs == -1:
             # Return the full unsorted and unranked logprobs.
             logprobs_tensors = LogprobsTensors(
-                torch.empty(0), raw_logprobs, torch.empty(0)
+                torch.empty(0),
+                raw_logprobs,
+                torch.empty(0),
+                moe_topk_indices=sample_moe_topk_indices,
             )
         else:
             # Gather the logprobs and ranks of the topk and sampled token.
+            # This produces the per-token logprobs payload returned upstream.
             logprobs_tensors = self.gather_logprobs(
-                raw_logprobs, num_logprobs, token_ids=sampled
+                raw_logprobs,
+                num_logprobs,
+                token_ids=sampled,
+                sample_moe_topk_indices=sample_moe_topk_indices,
             )
 
         # Use int32 to reduce the tensor size.
@@ -211,6 +222,7 @@ class Sampler(nn.Module):
         logprobs: torch.Tensor,
         num_logprobs: int,
         token_ids: torch.Tensor,
+        sample_moe_topk_indices: torch.Tensor | None = None,
     ) -> LogprobsTensors:
         """
         Gather logprobs for topk and sampled/prompt token.
@@ -248,7 +260,12 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         indices = indices.to(torch.int32)
 
-        return LogprobsTensors(indices, logprobs, token_ranks)
+        return LogprobsTensors(
+            indices,
+            logprobs,
+            token_ranks,
+            moe_topk_indices=sample_moe_topk_indices,
+        )
 
     @staticmethod
     def _combine_outputs_with_spec_tokens(
