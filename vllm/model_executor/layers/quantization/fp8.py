@@ -514,12 +514,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight, weight_scale = mxfp8_e4m3_quantize_python(weight.data.to(torch.bfloat16))
             weight_scale = swizzle_blockscale(weight_scale)
 
-        if self.quant_config.is_mx:
-            layer.weight_for_apply = torch.nn.Parameter(weight.data, requires_grad=False)
-            layer.weight_scale_for_apply = torch.nn.Parameter(weight_scale.data, requires_grad=False)
-        else:
-            replace_parameter(layer, "weight", weight.data)
-            replace_parameter(layer, "weight_scale", weight_scale.data)
+        replace_parameter(layer, "weight", weight.data)
+        replace_parameter(layer, "weight_scale", weight_scale.data)
             
         if input_scale is not None:
             replace_parameter(layer, "input_scale", input_scale)
@@ -609,8 +605,8 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.quant_config.is_mx:
             return self.fp8_linear.apply(
                 input=x,
-                weight=layer.weight_for_apply,
-                weight_scale=layer.weight_scale_for_apply,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
                 out_dtype=self.out_dtype,
                 bias=bias,
             )
@@ -746,14 +742,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         dynamic_per_token = (
             not self.block_quant and self.quant_config.activation_scheme != "static"
         )
-        if dynamic_per_token and self.fp8_backend in [
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
-            Fp8MoeBackend.FLASHINFER_CUTLASS,
-        ]:
-            raise NotImplementedError(
-                "FlashInfer FP8 MoE backend does not support dynamic per token "
-                "activation quantization."
-            )
+        # if dynamic_per_token and self.fp8_backend in [
+        #     Fp8MoeBackend.FLASHINFER_TRTLLM,
+        #     Fp8MoeBackend.FLASHINFER_CUTLASS,
+        # ]:
+        #     raise NotImplementedError(
+        #         "FlashInfer FP8 MoE backend does not support dynamic per token "
+        #         "activation quantization."
+        #     )
 
         self.kernel: mk.FusedMoEModularKernel | None = None
 
@@ -1007,64 +1003,32 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w2_weight, layer.w2_weight_scale
                 )
                 # This is a hack for mxfp8 only
-                assert (
-                    self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-                )
+                # assert (
+                #     self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+                # )
                 # register_moe_scaling_factors(layer)
 
                 # pad weights
                 layer.intermediate_size_per_partition = round_up(
                     layer.intermediate_size_per_partition, 128
                 )
-                layer.w13_weight = torch.nn.Parameter(
-                    pad_to(
-                        w13_q, 1, layer.intermediate_size_per_partition
-                    ).contiguous(),
-                    requires_grad=False,
-                )
-                layer.w13_scale = torch.nn.Parameter(
-                    pad_to(
-                        w13_scale,
-                        1,
-                        layer.intermediate_size_per_partition,
-                    )
-                    .to(dtype=torch.uint8)
-                    .contiguous(),
-                    requires_grad=False,
-                )
-                layer.w2_weight = torch.nn.Parameter(
-                    pad_to(
-                        w2_q, 2, layer.intermediate_size_per_partition
-                    ).contiguous(),
-                    requires_grad=False,
-                )
-                layer.w2_scale = torch.nn.Parameter(
-                    pad_to(
-                        w2_scale,
-                        2,
-                        layer.intermediate_size_per_partition // 32,
-                    )
-                    .to(dtype=torch.uint8)
-                    .contiguous(),
-                    requires_grad=False,
-                )
+                w13_q = pad_to(w13_q, 1, layer.intermediate_size_per_partition).contiguous()
+                w13_scale = pad_to(w13_scale, 1, layer.intermediate_size_per_partition).to(dtype=torch.uint8).contiguous()
+                w2_q = pad_to(w2_q, 2, layer.intermediate_size_per_partition).contiguous()
+                w2_scale = pad_to(w2_scale, 2, layer.intermediate_size_per_partition // 32).to(dtype=torch.uint8).contiguous()
 
                 gemm1_w, gemm2_w, gemm1_s, gemm2_s = (
                     rotate_flashinfer_fp8_moe_weights(
-                        layer.w13_weight,
-                        layer.w2_weight,
-                        layer.w13_scale.to(dtype=torch.uint8),
-                        layer.w2_scale.to(dtype=torch.uint8),
+                        w13_q,
+                        w2_q,
+                        w13_scale,
+                        w2_scale,
                     )
                 )
-                layer.w13_weight_shuffled = torch.nn.Parameter(gemm1_w, requires_grad=False)
-                layer.w2_weight_shuffled = torch.nn.Parameter(gemm2_w, requires_grad=False)
-                layer.w13_scales_shuffled = torch.nn.Parameter(gemm1_s, requires_grad=False)
-                layer.w2_scales_shuffled = torch.nn.Parameter(gemm2_s, requires_grad=False)
-                del layer.w13_weight
-                del layer.w2_weight
-                del layer.w13_scale
-                del layer.w2_scale
+                replace_parameter(layer, "w13_weight", gemm1_w)
+                replace_parameter(layer, "w2_weight", gemm2_w)
+                replace_parameter(layer, "w13_scale", gemm1_s)
+                replace_parameter(layer, "w2_scale", gemm2_s)
             else:
 
 
@@ -1311,10 +1275,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     routing_bias=e_score_correction_bias,
                     hidden_states=x_quant,
                     hidden_states_scale=x_scale,
-                    gemm1_weights=layer.w13_weight_shuffled,
-                    gemm1_weights_scale=layer.w13_scales_shuffled,
-                    gemm2_weights=layer.w2_weight_shuffled,
-                    gemm2_weights_scale=layer.w2_scales_shuffled,
+                    gemm1_weights=layer.w13_weight,
+                    gemm1_weights_scale=layer.w13_scale,
+                    gemm2_weights=layer.w2_weight,
+                    gemm2_weights_scale=layer.w2_scale,
                     num_experts=layer.global_num_experts,
                     top_k=layer.top_k,
                     n_group=layer.num_expert_group,
