@@ -225,6 +225,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         param = getattr(layer, name)
         args.arguments["param"] = param
         param.weight_loader(*args.args, **args.kwargs)
+    loaded_names = [name for name, _ in info.loaded_weights]
 
     # Process weights (quantization, repacking, etc.)
     # Attention/MLA are processed in `finalize_layerwise_reload`
@@ -236,8 +237,12 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # this code is a no-op if not reloading (because kernel tensors is empty)
     parameters, buffers = info.kernel_tensors
     for name, param in parameters.items():
+        if name not in loaded_names:
+            continue
         param.data.copy_(getattr(layer, name))
     for name, buffer in buffers.items():
+        if name not in loaded_names:
+            continue
         buffer.data.copy_(getattr(layer, name))
 
     _place_kernel_tensors(layer, info)
