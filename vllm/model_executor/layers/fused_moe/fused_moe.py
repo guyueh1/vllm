@@ -2124,6 +2124,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_int8_w8a8=self.quant_config.use_int8_w8a8,
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            use_mxfp8_fake_w8a8=self.quant_config.use_mxfp8_fake_w8a8,
             per_channel_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
             B_bias=self.w2_bias,
