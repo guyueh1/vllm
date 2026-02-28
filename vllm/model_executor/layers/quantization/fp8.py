@@ -605,8 +605,8 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.quant_config.is_mx:
             return self.fp8_linear.apply(
                 input=x,
-                weight=layer.weight,
-                weight_scale=layer.weight_scale,
+                weight=layer.weight_for_apply,
+                weight_scale=layer.weight_scale_for_apply,
                 out_dtype=self.out_dtype,
                 bias=bias,
             )
