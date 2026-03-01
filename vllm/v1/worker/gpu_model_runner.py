@@ -27,6 +27,12 @@ from vllm.attention.backends.abstract import (
     MultipleOf,
 )
 from vllm.attention.layer import Attention, MLAAttention
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+    get_global_experts_capturer,
+    init_routed_experts_capturer_with_shared_cache,
+)
+
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -682,6 +688,38 @@ class GPUModelRunner(
             with_numpy=numpy,
         )
 
+
+    def init_routed_experts_capturer(self):
+        max_running_requests = (
+            self.max_num_tokens // 2
+            if self.max_num_reqs is None
+            else self.max_num_reqs
+            // self.vllm_config.parallel_config.data_parallel_size
+        )
+
+        if hasattr(self.model.config, "n_shared_experts"):
+            num_fused_shared_experts = 1
+        else:
+            num_fused_shared_experts = 0
+
+        # Get rank and world_size for distributed setup
+        tp_group = get_tp_group()
+        rank = tp_group.rank_in_group if tp_group else 0
+        world_size = tp_group.world_size if tp_group else 1
+
+        # Initialize with shared host cache across devices
+        init_routed_experts_capturer_with_shared_cache(
+            enable=self.vllm_config.cache_config.return_routed_experts,
+            model_config=self.model_config,
+            num_fused_shared_experts=num_fused_shared_experts,
+            num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            max_running_requests=max_running_requests,
+            max_model_len=self.max_model_len,
+            device=self.device,
+            rank=rank,
+            world_size=world_size,
+        )
+        
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
 
@@ -773,6 +811,16 @@ class GPUModelRunner(
         # and handling the second as a new request.
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
+
+        # Free routed experts buffers for requests that finished in the PREVIOUS
+        # step. Their data was already extracted in the previous step's 
+        # _extract_routed_experts_for_current_batch call.
+        if self.cache_config.return_routed_experts:
+            capturer = get_global_experts_capturer()
+            host_cache = capturer.get_host_cache()
+            if host_cache is not None:
+                for req_id in scheduler_output.finished_req_ids:
+                    host_cache.free_request(req_id)
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
@@ -2319,6 +2367,52 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
+    def _extract_routed_experts_for_current_batch(
+        self,
+        req_ids: list[str],
+    ) -> dict[str, np.ndarray] | None:
+        """Extract routed experts for requests that may finish in the current step.
+        
+        This is called after _bookkeeping_sync to make routed experts available
+        in the ModelRunnerOutput for the SAME step where finish conditions are
+        checked. The scheduler will only use the data for requests that actually
+        finish in this step.
+        
+        Note: We don't free buffers here - that happens in _update_states for
+        requests that finished in the PREVIOUS step.
+        
+        Args:
+            req_ids: List of request IDs that may finish (generated tokens).
+            
+        Returns:
+            Dictionary mapping request ID to routed experts as numpy array,
+            or None if no data available.
+            Shape: np.ndarray[int16] = (seqlen, num_hidden_layers, num_experts_per_tok)
+        """
+        capturer = get_global_experts_capturer()
+        host_cache = capturer.get_host_cache()
+        
+        if host_cache is None:
+            return None
+        
+        result: dict[str, np.ndarray] = {}
+        for req_id in req_ids:
+            buf = host_cache.get_buffer(req_id)
+            if buf is not None:
+                seqlen = buf.shape[0]
+                if seqlen > 0:
+                    # Get experts without freeing (free_slot=False)
+                    # The buffer will be freed in _update_states after the
+                    # request finishes.
+                    experts = capturer.get_routed_experts(
+                        req_id, seqlen=seqlen, free_slot=False
+                    )
+                    if experts is not None:
+                        # Convert to numpy array (memory-efficient)
+                        result[req_id] = experts.numpy().astype(np.int16)
+        
+        return result if result else None
+
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
         supported_tasks = list[GenerationTask]()
@@ -2721,6 +2815,14 @@ class GPUModelRunner(
             scheduler_output.num_scheduled_tokens,
         )
 
+        # Sync routed experts from device to host cache.
+        # The actual extraction is done lazily via get_routed_experts_for_requests()
+        # when the scheduler determines which requests have finished.
+        get_global_experts_capturer().sync_fwd_experts_buffer_DtoH(
+            positions=self.positions.cpu[:num_scheduled_tokens],
+            num_scheduled_tokes=scheduler_output.num_scheduled_tokens
+        )
+        
         return (
             num_nans_in_logits,
             logprobs_lists,
@@ -3358,6 +3460,17 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            # Extract routed experts for all requests in the current batch.
+            # In async scheduling mode, valid_sampled_token_ids is empty at this point,
+            # so we extract for all requests and let the scheduler filter.
+            routed_experts_dict = None
+            if self.cache_config.return_routed_experts:
+                # Use req_ids_output_copy (all requests in batch) since
+                # valid_sampled_token_ids may be empty in async scheduling mode.
+                routed_experts_dict = self._extract_routed_experts_for_current_batch(
+                    req_ids_output_copy
+                )
+            
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -3371,6 +3484,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                routed_experts_dict=routed_experts_dict,
             )
 
         if not self.use_async_scheduling:
@@ -4201,7 +4315,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
             )
-
+        # self.init_routed_experts_capturer()
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
             num_scheduled_tokens,
@@ -4688,7 +4802,7 @@ class GPUModelRunner(
                     cudagraph_runtime_mode.name,
                 ),
             )
-
+        self.init_routed_experts_capturer()
         # We skip EPLB here since we don't want to record dummy metrics
         for num_tokens, activate_lora in compilation_cases:
             # We currently only capture ubatched graphs when its a FULL
